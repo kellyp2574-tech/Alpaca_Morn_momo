@@ -6,7 +6,7 @@ import queue
 import threading
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence
 
 from dotenv import load_dotenv
@@ -16,7 +16,9 @@ try:  # Run-time dependency on alpaca-py
     from alpaca.data.live import StockDataStream
     from alpaca.data.requests import StockBarsRequest, StockMostActiveRequest
     from alpaca.data.timeframe import TimeFrame
-except ImportError as exc:  # pragma: no cover - surfaced when module imported without deps
+except (
+    ImportError
+) as exc:  # pragma: no cover - surfaced when module imported without deps
     raise ImportError("alpaca-py must be installed to use data_alpaca") from exc
 
 
@@ -54,7 +56,9 @@ class AlpacaDataAdapter:
         feed = feed or os.getenv("ALPACA_DATA_FEED", "sip")
 
         if not api_key or not secret_key:
-            raise ValueError("Alpaca API key/secret must be provided via args or environment")
+            raise ValueError(
+                "Alpaca API key/secret must be provided via args or environment"
+            )
 
         self.feed = feed
         self._historical = StockHistoricalDataClient(api_key, secret_key)
@@ -78,18 +82,21 @@ class AlpacaDataAdapter:
         self,
         symbols: Sequence[str],
         timeframe: str,
-        start: str,
-        end: str,
+        start: datetime,
+        end: datetime,
     ) -> Dict[str, List[MinuteBar]]:
         """Fetch minute bars for symbols within [start, end]."""
         if timeframe != "1Min":
             raise ValueError("Only 1Min timeframe is supported for premarket scan")
 
+        start_utc = self._ensure_utc(start)
+        end_utc = self._ensure_utc(end)
+
         request = StockBarsRequest(
             symbol_or_symbols=list(symbols),
             timeframe=TimeFrame.Minute,
-            start=self._parse_ts(start),
-            end=self._parse_ts(end),
+            start=start_utc,
+            end=end_utc,
             feed=self.feed,
         )
         response = self._historical.get_stock_bars(request)
@@ -109,13 +116,15 @@ class AlpacaDataAdapter:
             return {}
         if end_dt is None:
             end_dt = datetime.utcnow()
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
         start_dt = end_dt - timedelta(days=lookback_days * 2)
 
         request = StockBarsRequest(
             symbol_or_symbols=list(symbols),
             timeframe=TimeFrame.Day,
-            start=start_dt,
-            end=end_dt,
+            start=self._ensure_utc(start_dt),
+            end=self._ensure_utc(end_dt),
             feed=self.feed,
         )
         response = self._historical.get_stock_bars(request)
@@ -143,7 +152,9 @@ class AlpacaDataAdapter:
         if not symbols:
             return
         if self._stream is None:
-            self._stream = StockDataStream(self._api_key, self._secret_key, feed=self.feed)
+            self._stream = StockDataStream(
+                self._api_key, self._secret_key, feed=self.feed
+            )
 
         for symbol in symbols:
             self._stream.subscribe_bars(self._on_stream_bar, symbol)
@@ -170,8 +181,10 @@ class AlpacaDataAdapter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_ts(value: str) -> datetime:
-        return datetime.fromisoformat(value)
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _to_minute_bar(symbol: str, bar) -> MinuteBar:

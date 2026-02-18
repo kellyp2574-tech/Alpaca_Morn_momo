@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, List
 
+from .clock import window_from_strings
 from .config import Config
 from .ranking import score_candidate
 from .storage import Candidate
@@ -48,13 +49,20 @@ def build_candidates(
     if not tracked_symbols:
         return []
 
+    scan_window = window_from_strings(
+        reference=date,
+        start_str=cfg.scan_start,
+        end_str=cfg.scan_end,
+    )
     pm_bars = alpaca.get_bars(
         tracked_symbols,
         timeframe="1Min",
-        start=f"{date:%Y-%m-%d} {cfg.scan_start}",
-        end=f"{date:%Y-%m-%d} {cfg.scan_end}",
+        start=scan_window.start,
+        end=scan_window.end,
     )
-    daily = alpaca.get_daily_bars(tracked_symbols, lookback_days=35)
+    daily = alpaca.get_daily_bars(
+        tracked_symbols, lookback_days=35, end_dt=scan_window.start
+    )
 
     candidates: List[Candidate] = []
     for symbol in tracked_symbols:

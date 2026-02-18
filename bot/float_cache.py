@@ -15,15 +15,13 @@ class FloatCache:
 
     def _init(self) -> None:
         with sqlite3.connect(self.db_path) as con:
-            con.execute(
-                """
+            con.execute("""
                 CREATE TABLE IF NOT EXISTS floats (
                     symbol TEXT PRIMARY KEY,
                     float_shares REAL NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
-                """
-            )
+                """)
 
     def get(self, symbol: str) -> Optional[float]:
         now = int(time.time())

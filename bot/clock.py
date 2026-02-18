@@ -85,7 +85,9 @@ def config_window(
     return window_from_strings(reference, start_str, end_str, tz)
 
 
-def is_in_window(cfg: Config, start_attr: str, end_attr: str, moment: Optional[datetime] = None) -> bool:
+def is_in_window(
+    cfg: Config, start_attr: str, end_attr: str, moment: Optional[datetime] = None
+) -> bool:
     """Return True if *moment* (default: now) is within the config window."""
 
     if moment is None:
@@ -94,19 +96,31 @@ def is_in_window(cfg: Config, start_attr: str, end_attr: str, moment: Optional[d
     return window.contains(moment)
 
 
-def minutes_until(cfg: Config, target_attr: str, moment: Optional[datetime] = None) -> float:
+def minutes_until(
+    cfg: Config, target_attr: str, moment: Optional[datetime] = None
+) -> float:
     """Minutes from *moment* (default: now) until the config time string."""
 
     if moment is None:
         moment = market_now()
-    target_time = datetime.combine(moment.astimezone(MARKET_TZ).date(), parse_time_str(getattr(cfg, target_attr)), MARKET_TZ)
+    target_time = datetime.combine(
+        moment.astimezone(MARKET_TZ).date(),
+        parse_time_str(getattr(cfg, target_attr)),
+        MARKET_TZ,
+    )
     return (target_time - moment.astimezone(MARKET_TZ)).total_seconds() / 60.0
 
 
-def minutes_since(cfg: Config, start_attr: str, moment: Optional[datetime] = None) -> float:
+def minutes_since(
+    cfg: Config, start_attr: str, moment: Optional[datetime] = None
+) -> float:
     """Minutes elapsed since the config time string on the same day."""
 
     if moment is None:
         moment = market_now()
-    start_time = datetime.combine(moment.astimezone(MARKET_TZ).date(), parse_time_str(getattr(cfg, start_attr)), MARKET_TZ)
+    start_time = datetime.combine(
+        moment.astimezone(MARKET_TZ).date(),
+        parse_time_str(getattr(cfg, start_attr)),
+        MARKET_TZ,
+    )
     return (moment.astimezone(MARKET_TZ) - start_time).total_seconds() / 60.0

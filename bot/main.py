@@ -53,7 +53,9 @@ class EntryLoop:
     def __init__(self, ctx: EntryContext) -> None:
         self.ctx = ctx
         self.alpaca = ctx.data.alpaca
-        self.bar_history: Dict[str, Deque] = defaultdict(lambda: deque(maxlen=ctx.max_bar_history))
+        self.bar_history: Dict[str, Deque] = defaultdict(
+            lambda: deque(maxlen=ctx.max_bar_history)
+        )
         self.vwap_state: Dict[str, VWAPState] = defaultdict(VWAPState)
         self.risk_manager = ctx.risk_manager
         self.positions = ctx.positions
@@ -69,13 +71,19 @@ class EntryLoop:
             logger.warning("No symbols qualified for the live session. Nothing to do.")
             return
 
-        logger.info("Subscribing to %d symbols: %s", len(watch_symbols), ", ".join(watch_symbols))
+        logger.info(
+            "Subscribing to %d symbols: %s",
+            len(watch_symbols),
+            ", ".join(watch_symbols),
+        )
         self.alpaca.subscribe_stream(watch_symbols)
 
         while True:
             now = market_now()
             if now >= hard_exit_window.end:
-                logger.info("Hard exit reached (%s). Stopping entry loop.", hard_exit_window.end)
+                logger.info(
+                    "Hard exit reached (%s). Stopping entry loop.", hard_exit_window.end
+                )
                 self._hard_exit()
                 break
 
@@ -113,7 +121,8 @@ class EntryLoop:
             return None
 
         bars_seq = list(bars)
-        if len(bars_seq) < cfg.atr_len + 1:
+        min_len = max(cfg.atr_len + 1, cfg.volume_avg_window + 1)
+        if len(bars_seq) < min_len:
             return None
 
         atr = atr_1m(bars_seq, cfg.atr_len)
@@ -124,11 +133,25 @@ class EntryLoop:
         vwap = self.vwap_state[symbol].vwap
         if last_bar.c < vwap:
             return None
-        if last_bar.h < candidate.pm_high:
+        if last_bar.c <= candidate.pm_high:
             return None
 
+        vol_window = cfg.volume_avg_window
+        if vol_window > 0:
+            recent = bars_seq[-(vol_window + 1) : -1]
+            prev_vols = [bar.v for bar in recent]
+            if len(prev_vols) < vol_window:
+                return None
+            avg_vol = sum(prev_vols) / vol_window if vol_window else 0.0
+            if avg_vol <= 0:
+                return None
+            if last_bar.v < cfg.volume_spike_mult * avg_vol:
+                return None
+
         stop_pct = initial_stop_pct(cfg, atr, last_bar.c)
-        qty = calc_qty(self.ctx.account_equity, cfg.risk_per_trade, last_bar.c, stop_pct)
+        qty = calc_qty(
+            self.ctx.account_equity, cfg.risk_per_trade, last_bar.c, stop_pct
+        )
         if qty < 1:
             return None
         qty = int(qty)
@@ -195,18 +218,49 @@ def build_watchlist(
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Morning momentum bot entry loop")
-    parser.add_argument("--most-active", type=int, default=50, help="Number of symbols to request from Alpaca most-actives")
-    parser.add_argument("--watchlist", type=int, default=12, help="Number of candidates to keep after ranking")
-    parser.add_argument("--max-bar-history", type=int, default=120, help="Bars kept per symbol for signal calculations")
-    parser.add_argument("--equity", type=float, default=100_000.0, help="Account equity used for risk-based sizing")
-    parser.add_argument("--live", action="store_true", help="Use live trading account (default paper)")
-    parser.add_argument("--dry-run", action="store_true", help="Log orders without submitting to Alpaca")
-    parser.add_argument("--state-path", type=str, default="state/positions.json", help="Path for persisted positions")
+    parser.add_argument(
+        "--most-active",
+        type=int,
+        default=50,
+        help="Number of symbols to request from Alpaca most-actives",
+    )
+    parser.add_argument(
+        "--watchlist",
+        type=int,
+        default=12,
+        help="Number of candidates to keep after ranking",
+    )
+    parser.add_argument(
+        "--max-bar-history",
+        type=int,
+        default=120,
+        help="Bars kept per symbol for signal calculations",
+    )
+    parser.add_argument(
+        "--equity",
+        type=float,
+        default=100_000.0,
+        help="Account equity used for risk-based sizing",
+    )
+    parser.add_argument(
+        "--live", action="store_true", help="Use live trading account (default paper)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Log orders without submitting to Alpaca"
+    )
+    parser.add_argument(
+        "--state-path",
+        type=str,
+        default="state/positions.json",
+        help="Path for persisted positions",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     args = parse_args(argv)
 
     cfg = Config()
@@ -228,7 +282,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     existing_positions = state_store.load_positions()
     if existing_positions:
         positions.load_states(existing_positions)
-        risk_manager.trades_taken = max(risk_manager.trades_taken, len(existing_positions))
+        risk_manager.trades_taken = max(
+            risk_manager.trades_taken, len(existing_positions)
+        )
 
     ctx = EntryContext(
         cfg=cfg,

@@ -44,17 +44,27 @@ class ExecutionClient:
             else:
                 paper = True
         if not dry_run and (not api_key or not secret_key):
-            raise ValueError("ExecutionClient requires Alpaca API credentials (or use dry_run)")
+            raise ValueError(
+                "ExecutionClient requires Alpaca API credentials (or use dry_run)"
+            )
 
         self.dry_run = dry_run
-        self.client = None if dry_run else TradingClient(api_key, secret_key, paper=paper)
+        self.client = (
+            None if dry_run else TradingClient(api_key, secret_key, paper=paper)
+        )
         self.cfg = cfg or ExecutionConfig()
 
     def _marketable_limit(self, price: float, side: OrderSide) -> float:
         adj = 1 + self.cfg.limit_slippage_pct
         if side == OrderSide.SELL:
             adj = 1 - self.cfg.limit_slippage_pct
-        return round(price * adj, 2)
+        raw = price * adj
+        # enforce at least a $0.01 shift for low-priced names
+        if side == OrderSide.BUY:
+            raw = max(raw, price + 0.01)
+        else:
+            raw = min(raw, price - 0.01)
+        return round(raw, 2)
 
     def place_entry(self, symbol: str, qty: int, last_price: float) -> Optional[str]:
         limit_price = self._marketable_limit(last_price, OrderSide.BUY)
@@ -64,12 +74,16 @@ class ExecutionClient:
         limit_price = self._marketable_limit(last_price, OrderSide.SELL)
         return self._submit_limit(symbol, qty, OrderSide.SELL, limit_price)
 
-    def _submit_limit(self, symbol: str, qty: int, side: OrderSide, limit_price: float) -> Optional[str]:
+    def _submit_limit(
+        self, symbol: str, qty: int, side: OrderSide, limit_price: float
+    ) -> Optional[str]:
         if qty <= 0:
             return None
 
         if self.dry_run:
-            logger.info("[DRY] %s %s qty %s @ %.2f", side.value, symbol, qty, limit_price)
+            logger.info(
+                "[DRY] %s %s qty %s @ %.2f", side.value, symbol, qty, limit_price
+            )
             return None
 
         order = LimitOrderRequest(
@@ -81,5 +95,12 @@ class ExecutionClient:
             limit_price=limit_price,
         )
         resp = self.client.submit_order(order)
-        logger.info("Submitted %s %s qty %s @ %.2f order_id=%s", side.value, symbol, qty, limit_price, resp.id)
+        logger.info(
+            "Submitted %s %s qty %s @ %.2f order_id=%s",
+            side.value,
+            symbol,
+            qty,
+            limit_price,
+            resp.id,
+        )
         return resp.id

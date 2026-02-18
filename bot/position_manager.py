@@ -26,7 +26,9 @@ def initial_stop_pct(cfg: Config, atr: float, entry: float) -> float:
     return clamp(raw, cfg.stop_min_pct, cfg.stop_max_pct)
 
 
-def calc_qty(account_equity: float, risk_pct: float, entry: float, stop_pct: float) -> float:
+def calc_qty(
+    account_equity: float, risk_pct: float, entry: float, stop_pct: float
+) -> float:
     risk_dollars = account_equity * risk_pct
     stop_dollars = entry * stop_pct
     if stop_dollars <= 0:
@@ -105,13 +107,17 @@ class PositionManager:
         price = bar.c
 
         # Breakeven move
-        if not state.breakeven_set and state.peak_price >= entry * (1 + self.cfg.breakeven_at_pct):
+        if not state.breakeven_set and state.peak_price >= entry * (
+            1 + self.cfg.breakeven_at_pct
+        ):
             state.stop_price = max(state.stop_price, entry)
             state.breakeven_set = True
             logger.info("%s stop moved to breakeven", symbol)
 
         # Trail activation and widening
-        if not state.trail_active and state.peak_price >= entry * (1 + self.cfg.trail_activate_at_pct):
+        if not state.trail_active and state.peak_price >= entry * (
+            1 + self.cfg.trail_activate_at_pct
+        ):
             state.trail_active = True
             state.trail_pct = self.cfg.trail_pct_1
             logger.info("%s trail activated at %.2f%%", symbol, state.trail_pct * 100)
@@ -131,7 +137,12 @@ class PositionManager:
             elapsed >= self.cfg.dead_momo_minutes
             and gain_pct < self.cfg.dead_momo_min_gain
         ):
-            logger.info("%s dead momentum exit (elapsed %.1f min, gain %.2f%%)", symbol, elapsed, gain_pct * 100)
+            logger.info(
+                "%s dead momentum exit (elapsed %.1f min, gain %.2f%%)",
+                symbol,
+                elapsed,
+                gain_pct * 100,
+            )
             self._exit(symbol, state, price, now, reason="dead_momo")
             return
 
@@ -143,7 +154,9 @@ class PositionManager:
 
         self._persist()
 
-    def force_exit_all(self, price_lookup: Dict[str, float], *, reason: str = "hard_exit") -> None:
+    def force_exit_all(
+        self, price_lookup: Dict[str, float], *, reason: str = "hard_exit"
+    ) -> None:
         for symbol, state in list(self.positions.items()):
             price = price_lookup.get(symbol, state.peak_price)
             self._exit(symbol, state, price, market_now(), reason=reason)
@@ -165,7 +178,9 @@ class PositionManager:
         state.exit_time = now
         state.exit_price = price
         if state.r_stop_pct > 0:
-            state.realized_r = (price - state.entry_price) / (state.entry_price * state.r_stop_pct)
+            state.realized_r = (price - state.entry_price) / (
+                state.entry_price * state.r_stop_pct
+            )
         else:
             state.realized_r = 0.0
         self.risk_manager.on_trade_closed(state.realized_r or 0.0)

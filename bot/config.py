@@ -14,7 +14,7 @@ class Config:
     entry_cutoff: str = "10:30"
     hard_exit: str = "11:00"
     intraday_start: str = "10:30"
-    intraday_end: str = "14:30"
+    intraday_end: str = "11:00"
 
     # Universe filters
     min_price: float = 2.0
@@ -44,3 +44,6 @@ class Config:
 
     dead_momo_minutes: int = 20
     dead_momo_min_gain: float = 0.03  # must be +3% after 20 mins
+
+    volume_avg_window: int = 5
+    volume_spike_mult: float = 1.5

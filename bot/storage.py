@@ -62,7 +62,11 @@ def position_state_to_dict(state: PositionState) -> Dict[str, Any]:
 
 def position_state_from_dict(payload: Dict[str, Any]) -> PositionState:
     entry_time = datetime.fromisoformat(payload["entry_time"])
-    exit_time = datetime.fromisoformat(payload["exit_time"]) if payload.get("exit_time") else None
+    exit_time = (
+        datetime.fromisoformat(payload["exit_time"])
+        if payload.get("exit_time")
+        else None
+    )
     return PositionState(
         symbol=payload["symbol"],
         entry_time=entry_time,
@@ -71,10 +75,22 @@ def position_state_from_dict(payload: Dict[str, Any]) -> PositionState:
         stop_price=float(payload["stop_price"]),
         peak_price=float(payload["peak_price"]),
         r_stop_pct=float(payload["r_stop_pct"]),
-        trail_pct=float(payload["trail_pct"]) if payload.get("trail_pct") is not None else None,
+        trail_pct=(
+            float(payload["trail_pct"])
+            if payload.get("trail_pct") is not None
+            else None
+        ),
         breakeven_set=bool(payload.get("breakeven_set", False)),
         trail_active=bool(payload.get("trail_active", False)),
         exit_time=exit_time,
-        exit_price=float(payload["exit_price"]) if payload.get("exit_price") is not None else None,
-        realized_r=float(payload["realized_r"]) if payload.get("realized_r") is not None else None,
+        exit_price=(
+            float(payload["exit_price"])
+            if payload.get("exit_price") is not None
+            else None
+        ),
+        realized_r=(
+            float(payload["realized_r"])
+            if payload.get("realized_r") is not None
+            else None
+        ),
     )
