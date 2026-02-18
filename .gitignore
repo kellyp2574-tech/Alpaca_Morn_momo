@@ -1,0 +1,25 @@
+# Python cache & build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments
+env/
+.venv/
+venv/
+
+# Local configuration
+.env
+.env.*
+state/
+floats.sqlite
+*.sqlite
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
