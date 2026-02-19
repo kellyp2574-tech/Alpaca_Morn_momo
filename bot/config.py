@@ -49,7 +49,6 @@ class Config:
     volume_avg_window: int = 5
     volume_spike_mult: float = 1.5
     entry_slip_pct: float = 0.002
-    entry_max_slip_pct: float = 0.005
     max_bar_delay_seconds: int = 30
     min_atr_dollars: float = 0.05
     min_1m_volume: int = 20_000
@@ -57,7 +56,11 @@ class Config:
     max_breakout_extension_pct: float = 0.02
     exec_slippage_buy_pct: float = 0.002
     exec_slippage_sell_pct: float = 0.005
-    max_notional_per_trade: float = 25_000.0
     max_spread_dollars: float = 0.03
     max_spread_pct: float = 0.005
+    exit_spread_dollars: float = 0.10  # exit if spread exceeds this...
+    exit_spread_pct: float = 0.02      # ...or this % of ask (whichever is larger)
+    spread_exit_grace_seconds: int = 60  # ignore spread exits this many seconds after entry
+    spread_exit_consecutive: int = 2     # require N consecutive bad-spread checks before exiting
+    exit_ack_timeout_seconds: int = 15   # seconds before reconciling an unresolved exit order
     quote_refresh_seconds: int = 5

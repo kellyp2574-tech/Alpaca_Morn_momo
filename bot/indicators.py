@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 def true_range(high: float, low: float, prev_close: float) -> float:

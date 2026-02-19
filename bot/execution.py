@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -18,11 +19,42 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
+def _is_not_found(exc: Exception) -> bool:
+    """Return True if *exc* represents a definitive 404 / resource-not-found response.
+
+    Alpaca-py raises ``alpaca.common.exceptions.APIError`` for HTTP errors.
+    We check the status_code attribute first, then fall back to inspecting the
+    string representation so the helper stays robust across SDK versions.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        return int(status) == 404
+    # Fallback: requests HTTPError or similar
+    response = getattr(exc, "response", None)
+    if response is not None:
+        code = getattr(response, "status_code", None)
+        if code is not None:
+            return int(code) == 404
+    # Last resort: string match
+    return "404" in str(exc) or "not found" in str(exc).lower()
+
+
+@dataclass
+class FillResult:
+    order_id: Optional[str]
+    filled_qty: float
+    avg_price: float
+    status: str  # 'filled', 'partial', 'unfilled', 'unknown', 'dry_run'
+
+
 @dataclass
 class ExecutionConfig:
     buy_slippage_pct: float = 0.002  # 0.2%
     sell_slippage_pct: float = 0.005  # 0.5%
     min_price: float = 0.01
+    fill_poll_interval_s: float = 0.1   # seconds between fill status polls
+    fill_poll_max_s: float = 2.0        # total time to poll before giving up (slow reconcile)
+    quick_poll_max_s: float = 1.0       # fast first-pass poll window right after submit
 
 
 class ExecutionClient:
@@ -90,25 +122,91 @@ class ExecutionClient:
         raw = max(raw, self.cfg.min_price)
         return round(raw, 2)
 
-    def place_entry(self, symbol: str, qty: int, last_price: float) -> Optional[str]:
+    def place_entry(
+        self, symbol: str, qty: int, last_price: float, *, client_order_id: str
+    ) -> FillResult:
         limit_price = self._marketable_limit(symbol, OrderSide.BUY, last_price)
-        return self._submit_limit(symbol, qty, OrderSide.BUY, limit_price)
+        return self._submit_and_poll(
+            symbol, qty, OrderSide.BUY, limit_price,
+            client_order_id=client_order_id, poll_max_s=self.cfg.quick_poll_max_s,
+        )
 
-    def place_exit(self, symbol: str, qty: int, last_price: float) -> Optional[str]:
-        limit_price = self._marketable_limit(symbol, OrderSide.SELL, last_price)
-        return self._submit_limit(symbol, qty, OrderSide.SELL, limit_price)
-
-    def _submit_limit(
-        self, symbol: str, qty: int, side: OrderSide, limit_price: float
-    ) -> Optional[str]:
+    def place_exit(
+        self, symbol: str, qty: int, last_price: float, *, client_order_id: str
+    ) -> FillResult:
+        # Reduce-only guard: clamp qty to broker-confirmed position size
+        broker_qty = self._get_broker_qty(symbol)
+        if broker_qty is not None and qty > broker_qty:
+            logger.warning(
+                "Clamping exit qty for %s from %d to broker qty %d",
+                symbol, qty, broker_qty,
+            )
+            qty = broker_qty
         if qty <= 0:
+            logger.warning("Exit for %s skipped: broker reports 0 position", symbol)
+            return FillResult(order_id=None, filled_qty=0.0, avg_price=0.0, status="unfilled")
+        limit_price = self._marketable_limit(symbol, OrderSide.SELL, last_price)
+        return self._submit_and_poll(
+            symbol, qty, OrderSide.SELL, limit_price,
+            client_order_id=client_order_id, poll_max_s=self.cfg.quick_poll_max_s,
+        )
+
+    def _get_broker_qty(self, symbol: str) -> Optional[int]:
+        """Return the broker-confirmed long qty for symbol.
+
+        Returns:
+            int >= 0  — broker holds this many shares
+            0         — position definitively absent (404)
+            None      — transient error; caller should not treat as absent
+        """
+        if self.dry_run or self.client is None:
             return None
+        try:
+            pos = self.client.get_open_position(symbol)
+            return max(0, int(float(pos.qty)))
+        except Exception as exc:
+            if _is_not_found(exc):
+                return 0
+            logger.warning("Transient error fetching broker position for %s: %s", symbol, exc)
+            return None
+
+    def find_order_by_client_id(self, client_order_id: str) -> Optional[FillResult]:
+        """Search for an order by deterministic client_order_id. Used for crash recovery.
+
+        Returns:
+            FillResult  — order found; status reflects its state
+            None        — transient error; caller should apply grace window
+        """
+        if self.dry_run or self.client is None:
+            return None
+        try:
+            order = self.client.get_order_by_client_id(client_order_id)
+            return self._order_to_fill_result(order)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return FillResult(order_id=None, filled_qty=0.0, avg_price=0.0, status="unfilled")
+            logger.warning("Transient error looking up order %s: %s", client_order_id, exc)
+            return None
+
+    def _submit_and_poll(
+        self,
+        symbol: str,
+        qty: int,
+        side: OrderSide,
+        limit_price: float,
+        *,
+        client_order_id: str,
+        poll_max_s: float,
+    ) -> FillResult:
+        if qty <= 0:
+            return FillResult(order_id=None, filled_qty=0.0, avg_price=0.0, status="unfilled")
 
         if self.dry_run:
             logger.info(
-                "[DRY] %s %s qty %s @ %.2f", side.value, symbol, qty, limit_price
+                "[DRY] %s %s qty %s @ %.2f client_id=%s",
+                side.value, symbol, qty, limit_price, client_order_id,
             )
-            return None
+            return FillResult(order_id=None, filled_qty=float(qty), avg_price=limit_price, status="dry_run")
 
         tif = TimeInForce.IOC if side == OrderSide.SELL else TimeInForce.DAY
         order = LimitOrderRequest(
@@ -118,14 +216,67 @@ class ExecutionClient:
             type=OrderType.LIMIT,
             time_in_force=tif,
             limit_price=limit_price,
+            client_order_id=client_order_id,
         )
         resp = self.client.submit_order(order)
+        order_id = str(resp.id)
         logger.info(
-            "Submitted %s %s qty %s @ %.2f order_id=%s",
-            side.value,
-            symbol,
-            qty,
-            limit_price,
-            resp.id,
+            "Submitted %s %s qty %s @ %.2f order_id=%s client_id=%s",
+            side.value, symbol, qty, limit_price, order_id, client_order_id,
         )
-        return resp.id
+        return self.poll_order_fill(order_id, fallback_price=limit_price, poll_max_s=poll_max_s)
+
+    def poll_order_fill(
+        self, order_id: str, *, fallback_price: float = 0.0, poll_max_s: Optional[float] = None
+    ) -> FillResult:
+        """Poll order status until terminal or timeout. Returns best available fill info."""
+        if poll_max_s is None:
+            poll_max_s = self.cfg.fill_poll_max_s
+        deadline = time.monotonic() + poll_max_s
+        while time.monotonic() < deadline:
+            try:
+                order = self.client.get_order_by_id(order_id)
+            except Exception:
+                logger.exception("Failed to poll order %s", order_id)
+                return FillResult(order_id=order_id, filled_qty=0.0, avg_price=fallback_price, status="unknown")
+            result = self._order_to_fill_result(order, fallback_price=fallback_price)
+            if result.status != "unknown":
+                return result
+            time.sleep(self.cfg.fill_poll_interval_s)
+
+        logger.warning("Order %s still live after %.1fs poll window", order_id, poll_max_s)
+        try:
+            order = self.client.get_order_by_id(order_id)
+            filled_qty = float(order.filled_qty or 0)
+            avg_price = float(order.filled_avg_price or fallback_price)
+            return FillResult(order_id=order_id, filled_qty=filled_qty, avg_price=avg_price, status="unknown")
+        except Exception:
+            return FillResult(order_id=order_id, filled_qty=0.0, avg_price=fallback_price, status="unknown")
+
+    @staticmethod
+    def _order_to_fill_result(
+        order: Any, *, fallback_price: float = 0.0
+    ) -> FillResult:
+        """Map an Alpaca order object to a FillResult with correct terminal status."""
+        order_id = str(order.id)
+        status = str(order.status).lower()
+        filled_qty = float(order.filled_qty or 0)
+        avg_price = float(order.filled_avg_price or fallback_price)
+
+        if status == "filled":
+            return FillResult(order_id=order_id, filled_qty=filled_qty, avg_price=avg_price, status="filled")
+
+        if status == "partially_filled":
+            return FillResult(order_id=order_id, filled_qty=filled_qty, avg_price=avg_price, status="partial")
+
+        if status in {"canceled", "expired"}:
+            # IOC cancel: if any shares filled, that's a partial; otherwise unfilled
+            if filled_qty > 0:
+                return FillResult(order_id=order_id, filled_qty=filled_qty, avg_price=avg_price, status="partial")
+            return FillResult(order_id=order_id, filled_qty=0.0, avg_price=0.0, status="unfilled")
+
+        if status == "rejected":
+            return FillResult(order_id=order_id, filled_qty=0.0, avg_price=0.0, status="unfilled")
+
+        # new, accepted, pending_new, held, done_for_day, etc. — not yet terminal
+        return FillResult(order_id=order_id, filled_qty=filled_qty, avg_price=avg_price, status="unknown")

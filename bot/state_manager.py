@@ -7,7 +7,14 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .storage import PositionState, position_state_from_dict, position_state_to_dict
+from .storage import (
+    PendingEntryState,
+    PositionState,
+    pending_entry_from_dict,
+    pending_entry_to_dict,
+    position_state_from_dict,
+    position_state_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +28,7 @@ class StateStore:
         else:
             self.risk_path = self.path.with_name("risk_state.json")
         self.risk_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pending_entries_path = self.path.with_name("pending_entries.json")
 
     def load_positions(self) -> Dict[str, PositionState]:
         if not self.path.exists():
@@ -45,6 +53,40 @@ class StateStore:
             json.dump(payload, fh, indent=2)
         tmp_path.replace(self.path)
         logger.debug("Persisted %d positions to %s", len(payload), self.path)
+
+    # ------------------------------------------------------------------
+
+    def load_pending_entries(self) -> Dict[str, PendingEntryState]:
+        """Return {symbol: PendingEntryState} for all persisted pending entries."""
+        if not self.pending_entries_path.exists():
+            return {}
+        try:
+            with self.pending_entries_path.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except json.JSONDecodeError:
+            logger.exception("Failed to decode %s; ignoring", self.pending_entries_path)
+            return {}
+        result: Dict[str, PendingEntryState] = {}
+        for item in raw:
+            p = pending_entry_from_dict(item)
+            result[p.symbol] = p
+        logger.info("Loaded %d pending entries from %s", len(result), self.pending_entries_path)
+        return result
+
+    def save_pending_entries(self, pending: Dict[str, PendingEntryState]) -> None:
+        payload = [pending_entry_to_dict(p) for p in pending.values()]
+        tmp = self.pending_entries_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        tmp.replace(self.pending_entries_path)
+        logger.debug("Persisted %d pending entries", len(payload))
+
+    def clear_pending_entry(self, symbol: str) -> None:
+        """Remove a single pending entry by symbol and re-save."""
+        pending = self.load_pending_entries()
+        if symbol in pending:
+            del pending[symbol]
+            self.save_pending_entries(pending)
 
     # ------------------------------------------------------------------
 

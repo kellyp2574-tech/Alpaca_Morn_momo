@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from .config import Config
 
@@ -59,8 +59,6 @@ class RiskManager:
         if self.state_store:
             self.state_store.save_risk_state(self.to_dict())
 
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from .state_manager import StateStore

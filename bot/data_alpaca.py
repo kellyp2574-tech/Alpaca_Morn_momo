@@ -90,7 +90,7 @@ class AlpacaDataAdapter:
 
     def get_most_actives(self, count: int = 50) -> List[str]:
         """Return the most-active symbols (by volume)."""
-        request = StockMostActiveRequest(top=count, feed=self.feed)
+        request = StockMostActiveRequest(top=count)
         response = self._historical.get_stock_most_active(request)
         return [entry.symbol for entry in response.most_active]
 
@@ -133,7 +133,7 @@ class AlpacaDataAdapter:
         if not symbols:
             return {}
         if end_dt is None:
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
         if end_dt.tzinfo is None:
             end_dt = end_dt.replace(tzinfo=timezone.utc)
         start_dt = end_dt - timedelta(days=lookback_days * 2)
