@@ -19,11 +19,11 @@ class Config:
 
     # Universe filters
     min_price: float = 2.0
-    max_price: float = 20.0
+    max_price: float = 30.0
     max_float: float = 30_000_000
-    min_gap_pct: float = 0.08
-    min_pm_vol_float: float = 0.03
-    min_relvol: float = 2.0
+    min_gap_pct: float = 0.05
+    min_pm_vol_float: float = 0.01
+    min_relvol: float = 0.3
 
     # Risk / slots
     risk_per_trade: float = 0.01  # 1% equity risk
@@ -65,3 +65,5 @@ class Config:
     exit_ack_timeout_seconds: int = 15   # seconds before reconciling an unresolved exit order
     quote_refresh_seconds: int = 5
     candidate_retry_minutes: int = 5     # retry premarket scan every N minutes if no candidates
+    universe_refresh_hours: str = "06:00,07:00,08:00,09:00,09:20,09:28"  # times to refresh universe (expensive)
+    light_refresh_minutes: int = 5       # light refresh interval between universe refreshes

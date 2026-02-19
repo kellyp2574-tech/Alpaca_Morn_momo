@@ -701,18 +701,163 @@ def fetch_candidates(
     *,
     most_active_count: int,
     date: Optional[datetime] = None,
-) -> List[Candidate]:
+    force_universe_refresh: bool = False,
+) -> tuple[List[Candidate], dict]:
+    """Fetch candidates with optional two-tier scan support.
+
+    Returns tuple of (candidates, scan_stats) where scan_stats contains:
+    - universe_count: symbols from most-actives
+    - float_ok: symbols with valid float
+    - bars_ok: symbols with sufficient PM bars
+    - pass_price/float/gap/pmvolfloat/relvol: filter pass counts
+    - near_miss: list of almost-candidates with failure reasons
+    """
     date = date or market_now()
+
+    # Track scan stats
+    stats = {
+        "universe_count": 0,
+        "float_ok": 0,
+        "bars_ok": 0,
+        "pass_price": 0,
+        "pass_float": 0,
+        "pass_gap": 0,
+        "pass_pmvolfloat": 0,
+        "pass_relvol": 0,
+        "near_miss": [],
+    }
+
     symbols = data.alpaca.get_most_actives(count=most_active_count)
-    candidates = build_candidates(
-        cfg,
-        alpaca=data.alpaca,
-        fmp=data.fmp,
-        float_cache=data.float_cache,
-        symbols=symbols,
-        date=date,
+    stats["universe_count"] = len(symbols)
+
+    # Get floats
+    floats = {}
+    missing = []
+    for symbol in symbols:
+        fs = data.float_cache.get(symbol)
+        if fs is None:
+            missing.append(symbol)
+        else:
+            floats[symbol] = fs
+
+    # Fetch missing floats if this is a universe refresh
+    if force_universe_refresh or not missing:
+        for symbol in missing:
+            fs = data.fmp.get_float(symbol)
+            if fs and fs > 0:
+                data.float_cache.set(symbol, fs)
+                floats[symbol] = fs
+
+    stats["float_ok"] = len(floats)
+
+    tracked_symbols = [s for s in symbols if s in floats]
+    if not tracked_symbols:
+        return [], stats
+
+    # Get PM bars
+    scan_window = window_from_strings(
+        reference=date,
+        start_str=cfg.scan_start,
+        end_str=cfg.scan_end,
     )
-    return candidates
+    pm_bars = data.alpaca.get_bars(
+        tracked_symbols,
+        timeframe="1Min",
+        start=scan_window.start,
+        end=scan_window.end,
+    )
+    daily = data.alpaca.get_daily_bars(
+        tracked_symbols, lookback_days=35, end_dt=scan_window.start
+    )
+
+    candidates: List[Candidate] = []
+    for symbol in tracked_symbols:
+        bars = pm_bars.get(symbol, [])
+        if len(bars) < 5:
+            continue
+        stats["bars_ok"] += 1
+
+        pm_volume = sum(bar.v for bar in bars)
+        pm_high = max(bar.h for bar in bars)
+        pm_last = bars[-1].c
+
+        daily_stats = daily.get(symbol)
+        if not daily_stats:
+            continue
+
+        prev_close = daily_stats.prev_close
+        avg_vol_30d = daily_stats.avg_vol_30d
+
+        fs = floats[symbol]
+        gap_pct = (pm_last - prev_close) / prev_close if prev_close > 0 else 0.0
+        pm_vol_float = pm_volume / fs if fs > 0 else 0.0
+        relvol = pm_volume / avg_vol_30d if avg_vol_30d > 0 else 0.0
+
+        price = pm_last
+
+        # Track filter passes
+        pass_price = cfg.min_price <= price <= cfg.max_price
+        pass_float = fs <= cfg.max_float
+        pass_gap = gap_pct >= cfg.min_gap_pct
+        pass_pmvolfloat = pm_vol_float >= cfg.min_pm_vol_float
+        pass_relvol = relvol >= cfg.min_relvol
+
+        if pass_price:
+            stats["pass_price"] += 1
+        if pass_float:
+            stats["pass_float"] += 1
+        if pass_gap:
+            stats["pass_gap"] += 1
+        if pass_pmvolfloat:
+            stats["pass_pmvolfloat"] += 1
+        if pass_relvol:
+            stats["pass_relvol"] += 1
+
+        if not (pass_price and pass_float and pass_gap and pass_pmvolfloat and pass_relvol):
+            # Track near misses - top candidates that almost made it
+            if len(stats["near_miss"]) < 10:
+                fail_reasons = []
+                if not pass_price:
+                    fail_reasons.append(f"price={price:.2f}")
+                if not pass_float:
+                    fail_reasons.append(f"float={fs/1e6:.1f}M")
+                if not pass_gap:
+                    fail_reasons.append(f"gap={gap_pct:.3f}")
+                if not pass_pmvolfloat:
+                    fail_reasons.append(f"pmvolfloat={pm_vol_float:.4f}")
+                if not pass_relvol:
+                    fail_reasons.append(f"relvol={relvol:.2f}")
+                stats["near_miss"].append({
+                    "symbol": symbol,
+                    "gap": gap_pct,
+                    "pm_vol_float": pm_vol_float,
+                    "relvol": relvol,
+                    "float": fs,
+                    "price": price,
+                    "fail": ",".join(fail_reasons),
+                })
+            continue
+
+        score = score_candidate(gap_pct, pm_vol_float, relvol)
+        candidates.append(
+            Candidate(
+                symbol=symbol,
+                price=price,
+                prev_close=prev_close,
+                pm_last=pm_last,
+                pm_high=pm_high,
+                pm_volume=pm_volume,
+                avg_vol_30d=avg_vol_30d,
+                float_shares=fs,
+                gap_pct=gap_pct,
+                pm_vol_float=pm_vol_float,
+                relvol=relvol,
+                score=score,
+            )
+        )
+
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    return candidates, stats
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -783,26 +928,99 @@ def _main_inner(args: argparse.Namespace) -> None:
 
     subscribe_count = max(args.watchlist, args.subscribe_count)
 
+    # Parse universe refresh times
+    universe_refresh_times = [datetime.strptime(t.strip(), "%H:%M").time() for t in cfg.universe_refresh_hours.split(",")]
+
+    # Track universe for two-tier scan
+    cached_universe = {"symbols": None, "last_refresh": None}
+
     # Retry loop: keep scanning for candidates until found or entry window opens
     entry_window = config_window(cfg, "entry_start", "entry_cutoff")
+    scan_attempt = 0
     candidates = []
     while not candidates:
-        candidates = fetch_candidates(
+        scan_attempt += 1
+        now = market_now()
+        current_time = now.time()
+
+        # Determine if this is a universe refresh or light refresh
+        is_universe_refresh = any(
+            current_time.hour == t.hour and current_time.minute < t.minute + 5
+            for t in universe_refresh_times
+        ) or cached_universe["symbols"] is None
+
+        # Fetch candidates with scan stats
+        candidates, stats = fetch_candidates(
             cfg,
             data,
             most_active_count=args.most_active,
+            force_universe_refresh=is_universe_refresh,
         )
 
+        # Log SCAN_SUMMARY
+        logger.info(
+            "SCAN_SUMMARY t=%s attempt=%d universe=%d float_ok=%d bars_ok=%d "
+            "pass_price=%d pass_float=%d pass_gap=%d pass_pmvolfloat=%d pass_relvol=%d "
+            "candidates=%d refresh=%s",
+            now.strftime("%H:%M"),
+            scan_attempt,
+            stats["universe_count"],
+            stats["float_ok"],
+            stats["bars_ok"],
+            stats["pass_price"],
+            stats["pass_float"],
+            stats["pass_gap"],
+            stats["pass_pmvolfloat"],
+            stats["pass_relvol"],
+            len(candidates),
+            "universe" if is_universe_refresh else "light",
+        )
+
+        # Log SCAN_NEAR_MISS if no candidates
+        if not candidates and stats["near_miss"]:
+            for nm in stats["near_miss"]:
+                logger.info(
+                    "SCAN_NEAR_MISS symbol=%s gap=%.3f pm_vol_float=%.4f relvol=%.2f float=%.1fM FAIL=%s",
+                    nm["symbol"],
+                    nm["gap"],
+                    nm["pm_vol_float"],
+                    nm["relvol"],
+                    nm["float"] / 1e6,
+                    nm["fail"],
+                )
+
         if not candidates:
-            now = market_now()
             if now >= entry_window.end:
                 logger.warning("No candidates found and entry window closed. Exiting.")
                 return
-            logger.warning(
-                "No qualified candidates returned from premarket scan. "
-                "Retrying in %d minutes...", cfg.candidate_retry_minutes
+
+            # Clock-bound sleep: compute next scan time on 5-minute boundary
+            next_minute = ((now.minute // cfg.light_refresh_minutes) + 1) * cfg.light_refresh_minutes
+            next_scan = now.replace(minute=next_minute % 60, second=0, microsecond=0)
+            if next_minute >= 60:
+                next_scan = next_scan + timedelta(hours=1)
+            sleep_seconds = (next_scan - now).total_seconds()
+
+            logger.info(
+                "No candidates. Next scan at %s (in %.0f seconds). Entry window closes at %s",
+                next_scan.strftime("%H:%M"),
+                sleep_seconds,
+                entry_window.end.strftime("%H:%M"),
             )
-            time.sleep(cfg.candidate_retry_minutes * 60)
+            time.sleep(max(sleep_seconds, 1))
+
+    # Log final candidates with metrics
+    for c in candidates[:args.watchlist]:
+        logger.info(
+            "CANDIDATE symbol=%s score=%.2f gap=%.3f pm_vol_float=%.4f relvol=%.2f float=%.1fM price=%.2f",
+            c.symbol,
+            c.score,
+            c.gap_pct,
+            c.pm_vol_float,
+            c.relvol,
+            c.float_shares / 1e6,
+            c.price,
+        )
 
     watchlist = candidates[: args.watchlist]
     subscribe_symbols = [c.symbol for c in candidates[:subscribe_count]]
