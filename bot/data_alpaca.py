@@ -16,9 +16,10 @@ try:  # Run-time dependency on alpaca-py
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.live import StockDataStream
     from alpaca.data.requests import (
+        MostActivesBy,
+        MostActivesRequest,
         StockBarsRequest,
         StockLatestQuoteRequest,
-        StockMostActiveRequest,
     )
     from alpaca.data.timeframe import TimeFrame
 except (
@@ -90,7 +91,7 @@ class AlpacaDataAdapter:
 
     def get_most_actives(self, count: int = 50) -> List[str]:
         """Return the most-active symbols (by volume)."""
-        request = StockMostActiveRequest(top=count)
+        request = MostActivesRequest(top=count, by=MostActivesBy.VOLUME)
         response = self._historical.get_stock_most_active(request)
         return [entry.symbol for entry in response.most_active]
 
