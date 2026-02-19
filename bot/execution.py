@@ -123,7 +123,7 @@ class ExecutionClient:
         return round(raw, 2)
 
     def place_entry(
-        self, symbol: str, qty: int, last_price: float, *, client_order_id: str
+        self, symbol: str, qty: float, last_price: float, *, client_order_id: str
     ) -> FillResult:
         limit_price = self._marketable_limit(symbol, OrderSide.BUY, last_price)
         return self._submit_and_poll(
@@ -132,16 +132,16 @@ class ExecutionClient:
         )
 
     def place_exit(
-        self, symbol: str, qty: int, last_price: float, *, client_order_id: str
+        self, symbol: str, qty: float, last_price: float, *, client_order_id: str
     ) -> FillResult:
         # Reduce-only guard: clamp qty to broker-confirmed position size
         broker_qty = self._get_broker_qty(symbol)
         if broker_qty is not None and qty > broker_qty:
             logger.warning(
-                "Clamping exit qty for %s from %d to broker qty %d",
+                "Clamping exit qty for %s from %s to broker qty %d",
                 symbol, qty, broker_qty,
             )
-            qty = broker_qty
+            qty = float(broker_qty)
         if qty <= 0:
             logger.warning("Exit for %s skipped: broker reports 0 position", symbol)
             return FillResult(order_id=None, filled_qty=0.0, avg_price=0.0, status="unfilled")
@@ -170,6 +170,23 @@ class ExecutionClient:
             logger.warning("Transient error fetching broker position for %s: %s", symbol, exc)
             return None
 
+    def is_fractionable(self, symbol: str) -> Optional[bool]:
+        """Check if a symbol can be traded fractionally.
+
+        Returns:
+            True   — fractional trading allowed
+            False  — whole shares only
+            None   — transient error; caller should default to whole shares
+        """
+        if self.dry_run or self.client is None:
+            return False
+        try:
+            asset = self.client.get_asset(symbol)
+            return getattr(asset, "fractionable", False)
+        except Exception:
+            logger.warning("Failed to check fractionable status for %s, defaulting to whole shares", symbol)
+            return False
+
     def find_order_by_client_id(self, client_order_id: str) -> Optional[FillResult]:
         """Search for an order by deterministic client_order_id. Used for crash recovery.
 
@@ -191,7 +208,7 @@ class ExecutionClient:
     def _submit_and_poll(
         self,
         symbol: str,
-        qty: int,
+        qty: float,
         side: OrderSide,
         limit_price: float,
         *,

@@ -155,7 +155,7 @@ class EntryContext:
 @dataclass
 class EntryDecision:
     price: float
-    qty: int
+    qty: float
     stop_pct: float
     atr: float
 
@@ -328,12 +328,22 @@ class EntryLoop:
         )
         if qty < 1:
             return None
+
+        # Check if fractional trading is allowed for this symbol
+        fractionable = self.ctx.execution.is_fractionable(symbol)
+
         notional = qty * entry_price
         max_notional = self.ctx.max_notional
         if max_notional > 0 and notional > max_notional:
-            qty = int(max_notional / entry_price)
+            # Apply max notional cap, then check fractionability
+            qty = max_notional / entry_price
+            if not fractionable:
+                qty = int(qty)  # floor to whole shares
         else:
-            qty = int(qty)
+            if not fractionable:
+                qty = int(qty)  # floor to whole shares
+            # else: keep fractional qty (floor applied via calc_qty already)
+
         if qty < 1:
             return None
 

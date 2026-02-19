@@ -376,7 +376,7 @@ class PositionManager:
         state.exit_price = price  # provisional; overwritten by actual fill
         self._persist()
 
-        qty = int(round(state.qty))
+        qty = state.qty
         fill = self.execution.place_exit(symbol, qty, price, client_order_id=client_id)
         state.exit_order_id = fill.order_id
         self._persist()
