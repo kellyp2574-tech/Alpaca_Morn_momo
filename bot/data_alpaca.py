@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 
 try:  # Run-time dependency on alpaca-py
     from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.historical.screener import ScreenerClient
+    from alpaca.data.requests import MostActivesBy, MostActivesRequest
     from alpaca.data.live import StockDataStream
     from alpaca.data.requests import (
-        MostActivesBy,
-        MostActivesRequest,
         StockBarsRequest,
         StockLatestQuoteRequest,
     )
@@ -78,6 +78,7 @@ class AlpacaDataAdapter:
 
         self.feed = feed
         self._historical = StockHistoricalDataClient(api_key, secret_key)
+        self._screener = ScreenerClient(api_key, secret_key)
         self._api_key = api_key
         self._secret_key = secret_key
 
@@ -91,9 +92,10 @@ class AlpacaDataAdapter:
 
     def get_most_actives(self, count: int = 50) -> List[str]:
         """Return the most-active symbols (by volume)."""
-        request = MostActivesRequest(top=count, by=MostActivesBy.VOLUME)
-        response = self._historical.get_stock_most_active(request)
-        return [entry.symbol for entry in response.most_active]
+        by = getattr(MostActivesBy, "DOLLAR_VOLUME", None) or MostActivesBy.VOLUME
+        req = MostActivesRequest(top=count, by=by)
+        resp = self._screener.get_most_actives(req)
+        return [row["symbol"] for row in (resp.most_actives or [])]
 
     def get_bars(
         self,
