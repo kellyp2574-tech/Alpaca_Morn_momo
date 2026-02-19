@@ -70,6 +70,17 @@ def window_from_strings(
     return TimeWindow(start=start_dt, end=end_dt)
 
 
+def market_datetime(
+    reference: Optional[datetime | date],
+    time_str: str,
+    tz: ZoneInfo = MARKET_TZ,
+) -> datetime:
+    """Return a timezone-aware datetime on *reference*'s date using *time_str*."""
+
+    trading_date = _coerce_date(reference, tz)
+    return datetime.combine(trading_date, parse_time_str(time_str), tz)
+
+
 def config_window(
     cfg: Config,
     start_attr: str,

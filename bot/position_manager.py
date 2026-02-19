@@ -148,7 +148,7 @@ class PositionManager:
 
         # Stop hit (synthetic)
         if bar.l <= state.stop_price:
-            exit_price = max(state.stop_price, bar.l)
+            exit_price = min(state.stop_price, bar.c)
             self._exit(symbol, state, exit_price, now, reason="stop")
             return
 

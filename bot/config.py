@@ -15,13 +15,14 @@ class Config:
     hard_exit: str = "11:00"
     intraday_start: str = "10:30"
     intraday_end: str = "11:00"
+    market_open: str = "09:30"
 
     # Universe filters
     min_price: float = 2.0
     max_price: float = 20.0
     max_float: float = 30_000_000
     min_gap_pct: float = 0.08
-    min_pm_vol_float: float = 0.05
+    min_pm_vol_float: float = 0.03
     min_relvol: float = 2.0
 
     # Risk / slots
@@ -47,3 +48,16 @@ class Config:
 
     volume_avg_window: int = 5
     volume_spike_mult: float = 1.5
+    entry_slip_pct: float = 0.002
+    entry_max_slip_pct: float = 0.005
+    max_bar_delay_seconds: int = 30
+    min_atr_dollars: float = 0.05
+    min_1m_volume: int = 20_000
+    min_1m_dollar_volume: float = 100_000.0
+    max_breakout_extension_pct: float = 0.02
+    exec_slippage_buy_pct: float = 0.002
+    exec_slippage_sell_pct: float = 0.005
+    max_notional_per_trade: float = 25_000.0
+    max_spread_dollars: float = 0.03
+    max_spread_pct: float = 0.005
+    quote_refresh_seconds: int = 5

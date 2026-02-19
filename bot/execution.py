@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
@@ -20,7 +20,9 @@ load_dotenv()
 
 @dataclass
 class ExecutionConfig:
-    limit_slippage_pct: float = 0.002  # 0.2%
+    buy_slippage_pct: float = 0.002  # 0.2%
+    sell_slippage_pct: float = 0.005  # 0.5%
+    min_price: float = 0.01
 
 
 class ExecutionClient:
@@ -33,6 +35,7 @@ class ExecutionClient:
         *,
         paper: Optional[bool] = None,
         cfg: Optional[ExecutionConfig] = None,
+        quote_provider: Optional[Callable[[str], Any]] = None,
         dry_run: bool = False,
     ) -> None:
         api_key = api_key or os.getenv("ALPACA_API_KEY")
@@ -53,25 +56,46 @@ class ExecutionClient:
             None if dry_run else TradingClient(api_key, secret_key, paper=paper)
         )
         self.cfg = cfg or ExecutionConfig()
+        self.quote_provider = quote_provider
 
-    def _marketable_limit(self, price: float, side: OrderSide) -> float:
-        adj = 1 + self.cfg.limit_slippage_pct
-        if side == OrderSide.SELL:
-            adj = 1 - self.cfg.limit_slippage_pct
-        raw = price * adj
-        # enforce at least a $0.01 shift for low-priced names
+    def _reference_price(self, symbol: str, side: OrderSide, fallback: float) -> float:
+        if not self.quote_provider:
+            return fallback
+        try:
+            quote = self.quote_provider(symbol)
+        except Exception:  # pragma: no cover - network errors
+            logger.exception("Failed to fetch quote for %s", symbol)
+            return fallback
+
         if side == OrderSide.BUY:
+            ask = float(getattr(quote, "ask_price", 0.0) or 0.0)
+            if ask > 0:
+                return ask
+        else:
+            bid = float(getattr(quote, "bid_price", 0.0) or 0.0)
+            if bid > 0:
+                return bid
+        return fallback
+
+    def _marketable_limit(self, symbol: str, side: OrderSide, fallback_price: float) -> float:
+        price = self._reference_price(symbol, side, fallback_price)
+        if side == OrderSide.BUY:
+            slip = self.cfg.buy_slippage_pct
+            raw = price * (1 + slip)
             raw = max(raw, price + 0.01)
         else:
+            slip = self.cfg.sell_slippage_pct
+            raw = price * (1 - slip)
             raw = min(raw, price - 0.01)
+        raw = max(raw, self.cfg.min_price)
         return round(raw, 2)
 
     def place_entry(self, symbol: str, qty: int, last_price: float) -> Optional[str]:
-        limit_price = self._marketable_limit(last_price, OrderSide.BUY)
+        limit_price = self._marketable_limit(symbol, OrderSide.BUY, last_price)
         return self._submit_limit(symbol, qty, OrderSide.BUY, limit_price)
 
     def place_exit(self, symbol: str, qty: int, last_price: float) -> Optional[str]:
-        limit_price = self._marketable_limit(last_price, OrderSide.SELL)
+        limit_price = self._marketable_limit(symbol, OrderSide.SELL, last_price)
         return self._submit_limit(symbol, qty, OrderSide.SELL, limit_price)
 
     def _submit_limit(
@@ -86,12 +110,13 @@ class ExecutionClient:
             )
             return None
 
+        tif = TimeInForce.IOC if side == OrderSide.SELL else TimeInForce.DAY
         order = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=side,
             type=OrderType.LIMIT,
-            time_in_force=TimeInForce.DAY,
+            time_in_force=tif,
             limit_price=limit_price,
         )
         resp = self.client.submit_order(order)

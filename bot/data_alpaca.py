@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import queue
 import threading
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence
@@ -14,7 +15,11 @@ from dotenv import load_dotenv
 try:  # Run-time dependency on alpaca-py
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.live import StockDataStream
-    from alpaca.data.requests import StockBarsRequest, StockMostActiveRequest
+    from alpaca.data.requests import (
+        StockBarsRequest,
+        StockLatestQuoteRequest,
+        StockMostActiveRequest,
+    )
     from alpaca.data.timeframe import TimeFrame
 except (
     ImportError
@@ -23,6 +28,10 @@ except (
 
 
 load_dotenv()  # loads ALPACA_* variables from .env if present
+
+from .clock import MARKET_TZ, market_now
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +49,12 @@ class MinuteBar:
 class DailyStats:
     prev_close: float
     avg_vol_30d: float
+
+
+@dataclass
+class Quote:
+    bid_price: float
+    ask_price: float
 
 
 class AlpacaDataAdapter:
@@ -67,7 +82,8 @@ class AlpacaDataAdapter:
 
         self._stream: Optional[StockDataStream] = None
         self._stream_thread: Optional[threading.Thread] = None
-        self._bar_queue: "queue.Queue[MinuteBar]" = queue.Queue()
+        self._bar_queue: "queue.Queue[MinuteBar]" = queue.Queue(maxsize=5000)
+        self._subscribed_symbols: set[str] = set()
 
     # ------------------------------------------------------------------
     # Historical endpoints
@@ -102,7 +118,9 @@ class AlpacaDataAdapter:
         response = self._historical.get_stock_bars(request)
         out: Dict[str, List[MinuteBar]] = {}
         for symbol, barset in response.data.items():
-            out[symbol] = [self._to_minute_bar(symbol, bar) for bar in barset]
+            bars = sorted(barset, key=lambda bar: bar.timestamp)
+            minute_bars = [self._to_minute_bar(symbol, bar) for bar in bars]
+            out[symbol] = minute_bars
         return out
 
     def get_daily_bars(
@@ -130,18 +148,59 @@ class AlpacaDataAdapter:
         response = self._historical.get_stock_bars(request)
 
         stats: Dict[str, DailyStats] = {}
+        today = market_now().date()
         for symbol, barset in response.data.items():
             if not barset:
                 continue
-            closes = [bar.close for bar in barset]
-            vols = [bar.volume for bar in barset]
-            if len(closes) < 2:
-                continue
-            prev_close = closes[-2]
+            bars = sorted(barset, key=lambda bar: bar.timestamp)
+            vols = [bar.volume for bar in bars]
+            last_bar = bars[-1]
+            last_dt = last_bar.timestamp
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            last_date = last_dt.astimezone(MARKET_TZ).date()
+            if last_date == today and len(bars) >= 2:
+                prev_close = bars[-2].close
+            else:
+                prev_close = last_bar.close
             vol_window = vols[-30:] if len(vols) >= 30 else vols
             avg_vol = sum(vol_window) / len(vol_window)
-            stats[symbol] = DailyStats(prev_close=prev_close, avg_vol_30d=avg_vol)
+            stats[symbol] = DailyStats(prev_close=float(prev_close), avg_vol_30d=float(avg_vol))
         return stats
+
+    def get_latest_quote(self, symbol: str) -> Quote:
+        """Fetch the best bid/ask for *symbol*."""
+
+        request = StockLatestQuoteRequest(symbol_or_symbols=[symbol], feed=self.feed)
+        response = self._historical.get_stock_latest_quote(request)
+        try:
+            quote = response[symbol]
+        except Exception:
+            logger.exception("Quote missing for %s", symbol)
+            return Quote(bid_price=0.0, ask_price=0.0)
+        bid = getattr(quote, "bid_price", None) or 0.0
+        ask = getattr(quote, "ask_price", None) or 0.0
+        return Quote(bid_price=float(bid), ask_price=float(ask))
+
+    def get_latest_quotes(self, symbols: Sequence[str]) -> Dict[str, Quote]:
+        """Fetch best bid/ask for multiple symbols with a single request."""
+
+        symbols = list(dict.fromkeys(symbols))
+        if not symbols:
+            return {}
+        request = StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=self.feed)
+        response = self._historical.get_stock_latest_quote(request)
+        quotes: Dict[str, Quote] = {}
+        for symbol in symbols:
+            try:
+                data = response[symbol]
+            except Exception:
+                logger.warning("Quote missing for %s", symbol)
+                continue
+            bid = getattr(data, "bid_price", None) or 0.0
+            ask = getattr(data, "ask_price", None) or 0.0
+            quotes[symbol] = Quote(bid_price=float(bid), ask_price=float(ask))
+        return quotes
 
     # ------------------------------------------------------------------
     # Live stream
@@ -156,8 +215,13 @@ class AlpacaDataAdapter:
                 self._api_key, self._secret_key, feed=self.feed
             )
 
-        for symbol in symbols:
+        new_symbols = [sym for sym in symbols if sym not in self._subscribed_symbols]
+        if not new_symbols:
+            return
+
+        for symbol in new_symbols:
             self._stream.subscribe_bars(self._on_stream_bar, symbol)
+            self._subscribed_symbols.add(symbol)
 
         if self._stream_thread is None or not self._stream_thread.is_alive():
             self._stream_thread = threading.Thread(target=self._stream.run, daemon=True)
@@ -177,6 +241,7 @@ class AlpacaDataAdapter:
             self._stream_thread.join(timeout=1)
         self._stream = None
         self._stream_thread = None
+        self._subscribed_symbols.clear()
 
     # ------------------------------------------------------------------
 
@@ -199,14 +264,23 @@ class AlpacaDataAdapter:
         )
 
     def _on_stream_bar(self, bar) -> None:
-        self._bar_queue.put(
-            MinuteBar(
-                symbol=bar.symbol,
-                timestamp=bar.timestamp,
-                o=bar.open,
-                h=bar.high,
-                l=bar.low,
-                c=bar.close,
-                v=bar.volume,
-            )
+        minute_bar = MinuteBar(
+            symbol=bar.symbol,
+            timestamp=bar.timestamp,
+            o=bar.open,
+            h=bar.high,
+            l=bar.low,
+            c=bar.close,
+            v=bar.volume,
         )
+        try:
+            self._bar_queue.put_nowait(minute_bar)
+        except queue.Full:
+            try:
+                self._bar_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._bar_queue.put_nowait(minute_bar)
+            except queue.Full:
+                logger.warning("Dropping bar for %s due to full queue", bar.symbol)
