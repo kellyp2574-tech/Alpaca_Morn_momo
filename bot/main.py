@@ -740,8 +740,8 @@ def fetch_candidates(
         else:
             floats[symbol] = fs
 
-    # Fetch missing floats if this is a universe refresh
-    if force_universe_refresh or not missing:
+    # Fetch missing floats only on universe refresh (expensive)
+    if force_universe_refresh:
         for symbol in missing:
             fs = data.fmp.get_float(symbol)
             if fs and fs > 0:
