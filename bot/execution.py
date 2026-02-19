@@ -70,8 +70,8 @@ class ExecutionClient:
         quote_provider: Optional[Callable[[str], Any]] = None,
         dry_run: bool = False,
     ) -> None:
-        api_key = api_key or os.getenv("ALPACA_API_KEY")
-        secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY")
+        api_key = api_key or os.getenv("APCA_API_KEY_ID") or os.getenv("ALPACA_API_KEY")
+        secret_key = secret_key or os.getenv("APCA_API_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
         if paper is None:
             paper_env = os.getenv("ALPACA_PAPER")
             if paper_env is not None:

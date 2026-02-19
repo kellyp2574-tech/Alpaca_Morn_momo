@@ -782,14 +782,27 @@ def _main_inner(args: argparse.Namespace) -> None:
     data = init_data_stack()
 
     subscribe_count = max(args.watchlist, args.subscribe_count)
-    candidates = fetch_candidates(
-        cfg,
-        data,
-        most_active_count=args.most_active,
-    )
 
-    if not candidates:
-        logger.warning("No qualified candidates returned from premarket scan.")
+    # Retry loop: keep scanning for candidates until found or entry window opens
+    entry_window = config_window(cfg, "entry_start", "entry_cutoff")
+    candidates = []
+    while not candidates:
+        candidates = fetch_candidates(
+            cfg,
+            data,
+            most_active_count=args.most_active,
+        )
+
+        if not candidates:
+            now = market_now()
+            if now >= entry_window.end:
+                logger.warning("No candidates found and entry window closed. Exiting.")
+                return
+            logger.warning(
+                "No qualified candidates returned from premarket scan. "
+                "Retrying in %d minutes...", cfg.candidate_retry_minutes
+            )
+            time.sleep(cfg.candidate_retry_minutes * 60)
 
     watchlist = candidates[: args.watchlist]
     subscribe_symbols = [c.symbol for c in candidates[:subscribe_count]]

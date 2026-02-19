@@ -39,6 +39,14 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+# Load .env early to ensure API keys are available throughout
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+
+# Debug check - remove after verifying
+import os
+print("DOTENV_CHECK", bool(os.getenv("APCA_API_KEY_ID")), bool(os.getenv("APCA_API_SECRET_KEY")))
+
 from bot.clock import MARKET_TZ, market_now, parse_time_str
 from bot.config import Config
 
@@ -96,8 +104,8 @@ def _check_market_open(args: argparse.Namespace) -> bool:
         from alpaca.trading.client import TradingClient
         from dotenv import load_dotenv
         load_dotenv()
-        api_key = _os.getenv("ALPACA_API_KEY")
-        secret_key = _os.getenv("ALPACA_SECRET_KEY")
+        api_key = _os.getenv("APCA_API_KEY_ID") or _os.getenv("ALPACA_API_KEY")
+        secret_key = _os.getenv("APCA_API_SECRET_KEY") or _os.getenv("ALPACA_SECRET_KEY")
         if not api_key or not secret_key:
             logger.warning("MARKET_CHECK skipped — no API credentials found")
             return True

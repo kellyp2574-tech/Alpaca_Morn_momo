@@ -67,8 +67,8 @@ class AlpacaDataAdapter:
         secret_key: Optional[str] = None,
         feed: Optional[str] = None,
     ) -> None:
-        api_key = api_key or os.getenv("ALPACA_API_KEY")
-        secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY")
+        api_key = api_key or os.getenv("APCA_API_KEY_ID") or os.getenv("ALPACA_API_KEY")
+        secret_key = secret_key or os.getenv("APCA_API_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
         feed = feed or os.getenv("ALPACA_DATA_FEED", "sip")
 
         if not api_key or not secret_key:
@@ -95,7 +95,17 @@ class AlpacaDataAdapter:
         by = getattr(MostActivesBy, "DOLLAR_VOLUME", None) or MostActivesBy.VOLUME
         req = MostActivesRequest(top=count, by=by)
         resp = self._screener.get_most_actives(req)
-        return [row["symbol"] for row in (resp.most_actives or [])]
+        items = resp.most_actives or []
+        symbols = []
+        for row in items:
+            sym = None
+            if isinstance(row, dict):
+                sym = row.get("symbol")
+            else:
+                sym = getattr(row, "symbol", None)
+            if sym:
+                symbols.append(str(sym))
+        return symbols
 
     def get_bars(
         self,

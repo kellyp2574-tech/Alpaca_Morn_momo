@@ -64,3 +64,4 @@ class Config:
     spread_exit_consecutive: int = 2     # require N consecutive bad-spread checks before exiting
     exit_ack_timeout_seconds: int = 15   # seconds before reconciling an unresolved exit order
     quote_refresh_seconds: int = 5
+    candidate_retry_minutes: int = 5     # retry premarket scan every N minutes if no candidates
