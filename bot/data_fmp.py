@@ -32,14 +32,24 @@ class FMPClient:
                 time.sleep(backoff)
                 backoff *= 2
                 continue
+            # Log failure for first attempt
+            if attempt == 0:
+                print(f"FMP_ERROR symbol={symbol} status={resp.status_code} body={resp.text[:200]}")
             return None
 
         data = resp.json()
         if not data:
+            print(f"FMP_ERROR symbol={symbol} empty_response")
             return None
         entry = data[0]
         float_shares = entry.get("floatShares") or entry.get("sharesOutstanding")
+        if not float_shares:
+            print(f"FMP_ERROR symbol={symbol} missing_float_fields keys={list(entry.keys())[:10]}")
         try:
-            return float(float_shares) if float_shares else None
+            result = float(float_shares) if float_shares else None
+            if result:
+                print(f"FMP_OK symbol={symbol} float={result}")
+            return result
         except (TypeError, ValueError):
+            print(f"FMP_ERROR symbol={symbol} parse_error value={float_shares}")
             return None
