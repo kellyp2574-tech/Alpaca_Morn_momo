@@ -1,0 +1,41 @@
+﻿Running Pure Signal Backtest from 2022-01-01 to 2022-12-31
+Minimum dollar volume: $10,000,000
+Minimum price: $2.0
+
+
+Testing bucket: 7-15%
+  DEBUG SLIPPAGE: entry_raw=$140.25 entry_filled=$140.64 exit_raw=$142.29 exit_filled=$141.90 slip_$$=-1.26 slip_%=-0.90% exit=hard_exit
+  Candidates: 2813
+  Trades: 1084
+  Win Rate: 60.7%
+  Continuation Rate: 60.7%
+  Avg Return: 3.23%
+  Expectancy: 3.23%
+
+================================================================================
+PURE SIGNAL GAP BACKTEST (Test 1)
+Entry: 9:35 | Exit: 9:45 | Filters: Opening Strength, Portfolio
+================================================================================
+
+--- PORTFOLIO SIMULATION (Option B: Daily Cap, 25% max deployed) ---
+  DEBUG DAY 1: equity=$5000 40pct=$2000 hard_cap=$50000.0 daily_cap=$2000 trades=2 pos_per_trade=$1000.00
+  DEBUG TRADE: TSLA ret=-0.37% slip=$5.00 hair=$0.00 pnl=$-3.72
+  DEBUG DAY 1 END: deployed_today=$2000.00 unused=$0.00
+  DEBUG SUMMARY: days=205 sum_deployed=$1,527,904.36 sum_unused=$0.00
+7-15%: 1084 trades across 205 days -> Portfolio Return: 777.40% | Final: $43,870
+  Cap Stats: 0/1084 (0.0%) trades capped | 0 days affected
+  Avg Participation: 0.09% of 5-min vol | Max: 0.75%
+  Avg Deployed: $7,453/day | Avg Unused: $0/day
+  Max Drawdown: 7.02% | Longest Flat Period: 10 days
+SUMMARY start=5000 final=43870 ret_pct=777.4 max_dd_pct=7.0 trades=1084 win_pct=0.0 avg_ret=3.23 avg_deployed=7453
+--------------------------------------------------
+
+Bucket   Cand.   Trades  Trades/Day  Win%     Cont.%   Avg%       Med%       Exp%      
+-----------------------------------------------------------------------------------------------
+7-15%    2813    1084    4.2         60.7%    60.7%    3.23       1.20       3.23      
+
+CONTINUATION RATE BY GAP SIZE:
+----------------------------------------
+  7-15%: 60.7%
+
+Error: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>

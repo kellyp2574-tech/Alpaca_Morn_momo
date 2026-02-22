@@ -201,8 +201,19 @@ class GroupedDailyFetcher:
             return pd.DataFrame()
     
     def save_daily_cache(self, data: pd.DataFrame):
-        """Save daily data to cache."""
+        """Save daily data to cache, merging with existing data."""
         if data is not None and not data.empty:
+            # Check if we already have data and merge
+            existing = self.load_daily_cache()
+            if existing is not None and not existing.empty:
+                print(f"Merging with existing {len(existing):,} records...")
+                # Combine and remove duplicates
+                combined = pd.concat([existing, data], ignore_index=True)
+                combined = combined.drop_duplicates(subset=['symbol', 'date'], keep='last')
+                combined = combined.sort_values(['symbol', 'date'])
+                data = combined
+                print(f"Combined total: {len(data):,} records")
+            
             # Sort by symbol and date for efficient querying
             data = data.sort_values(['symbol', 'date'])
             

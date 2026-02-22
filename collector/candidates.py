@@ -146,13 +146,16 @@ class CandidateGenerator:
             
             # Save combined candidates
             if all_candidates:
-                combined = pd.concat(all_candidates.values(), ignore_index=True)
-                combined = combined.sort_values(['date', 'gap_magnitude'], ascending=[True, False])
-                try:
-                    self.storage.write_meta(combined, "candidate_days.parquet")
-                    print(f"Generated {len(combined)} total candidates across all thresholds")
-                except Exception as e:
-                    print(f"Generated {len(combined)} total candidates across all thresholds (storage skipped: {e})")
+                # Filter out empty DataFrames and ensure 'date' column exists
+                valid_candidates = [df for df in all_candidates.values() if not df.empty and 'date' in df.columns]
+                if valid_candidates:
+                    combined = pd.concat(valid_candidates, ignore_index=True)
+                    combined = combined.sort_values(['date', 'gap_magnitude'], ascending=[True, False])
+                    try:
+                        self.storage.write_meta(combined, "candidate_days.parquet")
+                        print(f"Generated {len(combined)} total candidates across all thresholds")
+                    except Exception as e:
+                        print(f"Generated {len(combined)} total candidates across all thresholds (storage skipped: {e})")
         except Exception as e:
             print(f"Error during candidate generation: {e}")
             import traceback

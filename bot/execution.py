@@ -138,7 +138,7 @@ class ExecutionClient:
         broker_qty = self._get_broker_qty(symbol)
         if broker_qty is not None and qty > broker_qty:
             logger.warning(
-                "Clamping exit qty for %s from %s to broker qty %d",
+                "Clamping exit qty for %s from %s to broker qty %.4f",
                 symbol, qty, broker_qty,
             )
             qty = float(broker_qty)
@@ -151,19 +151,19 @@ class ExecutionClient:
             client_order_id=client_order_id, poll_max_s=self.cfg.quick_poll_max_s,
         )
 
-    def _get_broker_qty(self, symbol: str) -> Optional[int]:
+    def _get_broker_qty(self, symbol: str) -> Optional[float]:
         """Return the broker-confirmed long qty for symbol.
 
         Returns:
-            int >= 0  — broker holds this many shares
-            0         — position definitively absent (404)
-            None      — transient error; caller should not treat as absent
+            float >= 0  — broker holds this many shares (including fractional)
+            0           — position definitively absent (404)
+            None        — transient error; caller should not treat as absent
         """
         if self.dry_run or self.client is None:
             return None
         try:
             pos = self.client.get_open_position(symbol)
-            return max(0, int(float(pos.qty)))
+            return max(0.0, float(pos.qty))
         except Exception as exc:
             if _is_not_found(exc):
                 return 0
@@ -184,8 +184,8 @@ class ExecutionClient:
             asset = self.client.get_asset(symbol)
             return getattr(asset, "fractionable", False)
         except Exception:
-            logger.warning("Failed to check fractionable status for %s, defaulting to whole shares", symbol)
-            return False
+            logger.warning("Failed to check fractionable status for %s, returning None", symbol)
+            return None
 
     def find_order_by_client_id(self, client_order_id: str) -> Optional[FillResult]:
         """Search for an order by deterministic client_order_id. Used for crash recovery.
@@ -225,7 +225,10 @@ class ExecutionClient:
             )
             return FillResult(order_id=None, filled_qty=float(qty), avg_price=limit_price, status="dry_run")
 
-        tif = TimeInForce.IOC if side == OrderSide.SELL else TimeInForce.DAY
+        # Use IOC for whole shares, DAY for fractional (Alpaca may reject fractional IOC)
+        is_fractional = abs(qty - round(qty)) > 0.0001
+        tif = TimeInForce.DAY if is_fractional else (TimeInForce.IOC if side == OrderSide.SELL else TimeInForce.DAY)
+        
         order = LimitOrderRequest(
             symbol=symbol,
             qty=qty,

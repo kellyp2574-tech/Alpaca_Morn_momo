@@ -23,3 +23,4 @@ floats.sqlite
 
 # Logs
 *.log
+data/

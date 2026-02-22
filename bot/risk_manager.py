@@ -39,7 +39,8 @@ class RiskManager:
             self._persist()
 
     def can_enter(self, open_positions: int) -> Tuple[bool, str]:
-        if self.realized_r_total <= self.cfg.daily_kill_r:
+        # daily_kill_r must be negative (e.g., -3R) - if 0 or positive, no kill
+        if self.cfg.daily_kill_r < 0 and self.realized_r_total <= self.cfg.daily_kill_r:
             return False, "daily_kill"
         if self.trades_taken >= self.cfg.max_trades_per_day:
             return False, "max_trades"

@@ -60,7 +60,7 @@ class PendingEntryState:
     submitted_ts: float        # epoch seconds
     attempts: int = 1
     stop_pct: float = 0.0      # needed to open PositionState on adoption
-    intended_qty: int = 0      # intended qty at submission
+    intended_qty: float = 0.0      # intended qty at submission
     intended_price: float = 0.0
     cancel_requested_ts: float = 0.0   # epoch seconds of last cancel attempt (0 = never)
     cancel_attempts: int = 0           # number of cancel attempts made
@@ -87,7 +87,7 @@ def pending_entry_from_dict(payload: Dict[str, Any]) -> PendingEntryState:
         submitted_ts=float(payload["submitted_ts"]),
         attempts=int(payload.get("attempts", 1)),
         stop_pct=float(payload.get("stop_pct", 0.0)),
-        intended_qty=int(payload.get("intended_qty", 0)),
+        intended_qty=float(payload.get("intended_qty", 0.0)),
         intended_price=float(payload.get("intended_price", 0.0)),
         cancel_requested_ts=float(payload.get("cancel_requested_ts", 0.0)),
         cancel_attempts=int(payload.get("cancel_attempts", 0)),

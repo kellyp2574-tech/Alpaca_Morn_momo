@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import time
 from collections import defaultdict, deque
@@ -142,6 +143,7 @@ class EntryContext:
     candidate_map: Dict[str, Candidate]
     risk_manager: RiskManager
     account_equity: float
+    account_cash: float
     execution: ExecutionClient
     positions: PositionManager
     state_store: StateStore
@@ -200,6 +202,9 @@ class EntryLoop:
         )
         self.alpaca.subscribe_stream(watch_symbols)
 
+        entry_started = False
+        next_exit_check = None
+        
         while True:
             now = market_now()
 
@@ -219,6 +224,16 @@ class EntryLoop:
                 )
                 self._hard_exit()
                 break
+            
+            # Check exits every 2 seconds when in entry window
+            if entry_window.contains(now):
+                if not entry_started:
+                    entry_started = True
+                    next_exit_check = now
+                
+                if next_exit_check and now >= next_exit_check:
+                    self._check_position_exits(now)
+                    next_exit_check = now + timedelta(seconds=2)
 
             bar = self.alpaca.next_bar(timeout=5)
             if bar is None:
@@ -269,85 +284,94 @@ class EntryLoop:
         if candidate is None:
             return None
 
+        # Check if already attempted today
+        now = market_now()
+        today = now.date()
+        
+        # Reset attempted entries if new day
+        if not hasattr(self, '_attempted_date') or self._attempted_date != today:
+            self._attempted_entries = set()
+            self._attempted_date = today
+            
+        if symbol in self._attempted_entries:
+            return None
+        
+        # Entry window: after 9:35 but before cutoff
+        entry_start_dt = market_datetime(None, cfg.entry_start)
+        entry_cutoff_dt = market_datetime(None, cfg.entry_cutoff)
+        
+        if now < entry_start_dt:
+            return None
+        if now > entry_cutoff_dt:
+            return None
+            
         bars_seq = list(bars)
         rth_bars = [b for b in bars_seq if b.timestamp >= self.market_open_dt]
-        min_len = max(cfg.atr_len + 1, cfg.volume_avg_window + 1)
-        if len(rth_bars) < min_len:
+        
+        # Need at least 5 min bars (9:30-9:35)
+        if len(rth_bars) < 5:
             return None
-
-        atr = atr_1m(rth_bars, cfg.atr_len)
-        if atr <= 0:
-            return None
-        if atr < cfg.min_atr_dollars:
-            return None
-
-        last_bar = rth_bars[-1]
-        vwap = self.vwap_state[symbol].vwap
-        if vwap <= 0:
-            return None
-        if last_bar.c < vwap:
-            return None
-        if last_bar.c <= candidate.pm_high:
-            return None
-        if last_bar.c > candidate.pm_high * (1 + cfg.max_breakout_extension_pct):
-            return None
-
-        vol_window = cfg.volume_avg_window
-        if vol_window > 0:
-            recent = rth_bars[-(vol_window + 1) : -1]
-            prev_vols = [bar.v for bar in recent]
-            if len(prev_vols) < vol_window:
+        
+        # Get first 5 min bars (9:30-9:35)
+        first_5min_bars = rth_bars[:5]
+        
+        # Check 1: First 5-min dollar volume must be >= $1M
+        # Dollar volume = sum(v * c) for each bar
+        if len(first_5min_bars) >= 5:
+            dollar_vol_5min = sum(bar.v * bar.c for bar in first_5min_bars)
+            if dollar_vol_5min < cfg.min_5min_volume:
+                logger.info("%s failed 5min volume check: $%.0f < $%.0f", 
+                    symbol, dollar_vol_5min, cfg.min_5min_volume)
                 return None
-            avg_vol = sum(prev_vols) / vol_window if vol_window else 0.0
-            if avg_vol <= 0:
+        
+        # Check 2: Opening strength - 9:35 close > 9:30 open (aggregate 5-min green)
+        if cfg.opening_strength and first_5min_bars:
+            open_930 = first_5min_bars[0].o
+            close_935 = first_5min_bars[-1].c
+            if close_935 <= open_930:
+                logger.info("%s failed opening strength: close_935=%.2f <= open_930=%.2f", 
+                    symbol, close_935, open_930)
                 return None
-            if last_bar.v < cfg.volume_spike_mult * avg_vol:
-                return None
-        if last_bar.v < cfg.min_1m_volume:
-            return None
-        if last_bar.v * last_bar.c < cfg.min_1m_dollar_volume:
-            return None
-
+        
+        # Get quote for entry
         quote = self.latest_quotes.get(symbol)
         if not quote:
             return None
         if quote.ask_price <= 0 or quote.bid_price <= 0:
             return None
-        spread = quote.ask_price - quote.bid_price
-        if spread <= 0:
-            return None
-        max_spread = max(cfg.max_spread_dollars, cfg.max_spread_pct * quote.ask_price)
-        if spread > max_spread:
-            return None
-
+        
         entry_price = quote.ask_price
 
-        stop_pct = initial_stop_pct(cfg, atr, entry_price)
-        qty = calc_qty(
-            self.ctx.account_equity, cfg.risk_per_trade, entry_price, stop_pct
-        )
-        if qty < 1:
-            return None
-
-        # Check if fractional trading is allowed for this symbol
+        # Calculate position size: notional deployment (50% of cash / N candidates)
+        daily_cash = self.ctx.account_cash * cfg.daily_deploy_pct
+        num_to_trade = len(self.ctx.watchlist)  # Use watchlist size, not candidate_map
+        target_notional = daily_cash / max(num_to_trade, 1)
+        
+        # Calculate qty based on target notional
+        qty = target_notional / entry_price
+        
+        # Check if fractional trading is allowed
         fractionable = self.ctx.execution.is_fractionable(symbol)
-
-        notional = qty * entry_price
-        max_notional = self.ctx.max_notional
-        if max_notional > 0 and notional > max_notional:
-            # Apply max notional cap, then check fractionability
-            qty = max_notional / entry_price
-            if not fractionable:
-                qty = int(qty)  # floor to whole shares
-        else:
-            if not fractionable:
-                qty = int(qty)  # floor to whole shares
-            # else: keep fractional qty (floor applied via calc_qty already)
-
+        
+        # Apply hard cap
+        if cfg.max_daily_deploy > 0:
+            max_per_trade = cfg.max_daily_deploy / max(num_to_trade, 1)
+            max_qty = max_per_trade / entry_price
+            qty = min(qty, max_qty)
+        
+        # Only allow fractional if fractionable, otherwise floor to int
+        if not fractionable:
+            qty = math.floor(qty)
+        
         if qty < 1:
             return None
 
-        return EntryDecision(price=entry_price, qty=qty, stop_pct=stop_pct, atr=atr)
+        # Mark as attempted
+        if not hasattr(self, '_attempted_entries'):
+            self._attempted_entries = set()
+        self._attempted_entries.add(symbol)
+
+        return EntryDecision(price=entry_price, qty=qty, stop_pct=cfg.stop_loss_pct, atr=0.0)
 
     def _place_entry(self, symbol: str, decision: EntryDecision, now: datetime) -> None:
         if self.positions.has_position(symbol):
@@ -404,7 +428,13 @@ class EntryLoop:
 
         # filled, partial, or dry_run: open position with actual broker fill data
         # Always prefer broker-reported qty/price; fall back to intended only if missing
-        filled_qty = int(round(fill.filled_qty)) if fill.filled_qty > 0 else decision.qty
+        # Keep fractional if allowed, otherwise floor
+        fractionable = self.ctx.execution.is_fractionable(symbol)
+        if fill.filled_qty > 0:
+            filled_qty = fill.filled_qty if fractionable else math.floor(fill.filled_qty)
+        else:
+            filled_qty = decision.qty
+        
         exec_price = fill.avg_price if fill.avg_price > 0 else round(
             decision.price * (1 + self.ctx.cfg.entry_slip_pct), 2
         )
@@ -471,14 +501,50 @@ class EntryLoop:
             else:
                 state.spread_bad_count = 0
 
-            if state.spread_bad_count < cfg.spread_exit_consecutive:
-                continue
+            if state.spread_bad_count >= cfg.spread_exit_consecutive:
+                logger.info("Exit %s due to spread blowout (%.2f > %.2f)", symbol, spread, max_spread)
+                self.positions.exit_position(symbol, quote.bid_price, now, reason="spread_exit")
 
-            logger.warning(
-                "Spread expansion exit %s bid=%.2f ask=%.2f spread=%.4f thresh=%.4f",
-                symbol, quote.bid_price, quote.ask_price, spread, max_spread,
-            )
-            self.positions.exit_position(symbol, quote.bid_price, now, reason="spread_expansion")
+    def _check_position_exits(self, now: datetime) -> None:
+        """Check trailing stop and stop loss exits every 2 seconds."""
+        cfg = self.ctx.cfg
+        
+        for symbol, state in list(self.positions.positions.items()):
+            if state.exit_pending:
+                continue
+            
+            quote = self.latest_quotes.get(symbol)
+            if not quote or quote.bid_price <= 0:
+                continue
+            
+            current_price = quote.bid_price
+            entry = state.entry_price
+            
+            # Update peak price
+            if current_price > state.peak_price:
+                state.peak_price = current_price
+            
+            # Check trailing stop activation
+            if not state.trail_active and state.peak_price >= entry * (1 + cfg.take_profit_pct):
+                state.trail_active = True
+                logger.info("%s trail activated at %.2f%%", symbol, cfg.trail_pct * 100)
+            
+            # Check trailing stop exit
+            if state.trail_active:
+                trail_stop = state.peak_price * (1 - cfg.trail_pct)
+                if current_price <= trail_stop:
+                    logger.info("Exit %s: trailing stop hit (price=%.2f < trail=%.2f)", 
+                        symbol, current_price, trail_stop)
+                    self.positions.exit_position(symbol, current_price, now, reason="trailing_stop")
+                    continue
+            
+            # Check stop loss exit
+            if cfg.stop_loss_pct > 0:
+                sl_price = entry * (1 - cfg.stop_loss_pct)
+                if current_price <= sl_price:
+                    logger.info("Exit %s: stop loss hit (price=%.2f < sl=%.2f)", 
+                        symbol, current_price, sl_price)
+                    self.positions.exit_position(symbol, current_price, now, reason="stop_loss")
 
     def _maybe_refresh_quotes(self, now: datetime, symbols: List[str]) -> None:
         refresh_interval = self.ctx.cfg.quote_refresh_seconds
@@ -592,7 +658,12 @@ def _reconcile_pending_entries(
 
         # ── Terminal: filled or partial — verify broker position then adopt ──
         if fill.status in {"filled", "partial"}:
-            filled_qty = int(round(fill.filled_qty)) if fill.filled_qty > 0 else p.intended_qty
+            # Keep fractional if allowed, otherwise floor
+            fractionable = execution.is_fractionable(symbol)
+            if fill.filled_qty > 0:
+                filled_qty = fill.filled_qty if fractionable else math.floor(fill.filled_qty)
+            else:
+                filled_qty = p.intended_qty
             exec_price = fill.avg_price if fill.avg_price > 0 else p.intended_price
 
             # Item 4: confirm broker actually holds shares before opening
@@ -703,142 +774,117 @@ def fetch_candidates(
     date: Optional[datetime] = None,
     force_universe_refresh: bool = False,
 ) -> tuple[List[Candidate], dict]:
-    """Fetch candidates with optional two-tier scan support.
+    """Fetch candidates using gap strategy filters.
 
     Returns tuple of (candidates, scan_stats) where scan_stats contains:
     - universe_count: symbols from most-actives
-    - float_ok: symbols with valid float
-    - bars_ok: symbols with sufficient PM bars
-    - pass_price/float/gap/pmvolfloat/relvol: filter pass counts
-    - near_miss: list of almost-candidates with failure reasons
+    - pass_price/dollar_vol/gap/5min_vol/opening: filter pass counts
     """
     date = date or market_now()
 
     # Track scan stats
     stats = {
         "universe_count": 0,
-        "float_ok": 0,
-        "bars_ok": 0,
         "pass_price": 0,
-        "pass_float": 0,
+        "pass_dollar_vol": 0,
         "pass_gap": 0,
-        "pass_pmvolfloat": 0,
-        "pass_relvol": 0,
-        "near_miss": [],
+        "pass_5min_vol": 0,
+        "pass_opening": 0,
     }
 
     symbols = data.alpaca.get_most_actives(count=most_active_count)
     stats["universe_count"] = len(symbols)
 
-    # Get floats
-    floats = {}
-    missing = []
-    for symbol in symbols:
-        fs = data.float_cache.get(symbol)
-        if fs is None:
-            missing.append(symbol)
-        else:
-            floats[symbol] = fs
-
-    # Fetch missing floats only on universe refresh (expensive)
-    if force_universe_refresh:
-        for symbol in missing:
-            fs = data.fmp.get_float(symbol)
-            if fs and fs > 0:
-                data.float_cache.set(symbol, fs)
-                floats[symbol] = fs
-
-    stats["float_ok"] = len(floats)
-
-    tracked_symbols = [s for s in symbols if s in floats]
-    if not tracked_symbols:
-        return [], stats
-
-    # Get PM bars
+    # Get PM bars and daily bars
     scan_window = window_from_strings(
         reference=date,
         start_str=cfg.scan_start,
         end_str=cfg.scan_end,
     )
     pm_bars = data.alpaca.get_bars(
-        tracked_symbols,
+        symbols,
         timeframe="1Min",
         start=scan_window.start,
         end=scan_window.end,
     )
     daily = data.alpaca.get_daily_bars(
-        tracked_symbols, lookback_days=35, end_dt=scan_window.start
+        symbols, lookback_days=35, end_dt=scan_window.start
+    )
+    
+    # Get 1-min bars for market open (09:30-09:35) for opening strength check
+    market_open = window_from_strings(
+        reference=date,
+        start_str="09:30",
+        end_str="09:35",
+    )
+    rth_1m_bars = data.alpaca.get_bars(
+        symbols,
+        timeframe="1Min",
+        start=market_open.start,
+        end=market_open.end,
     )
 
     candidates: List[Candidate] = []
-    for symbol in tracked_symbols:
+    for symbol in symbols:
         bars = pm_bars.get(symbol, [])
         if len(bars) < 5:
             continue
-        stats["bars_ok"] += 1
 
-        pm_volume = sum(bar.v for bar in bars)
-        pm_high = max(bar.h for bar in bars)
         pm_last = bars[-1].c
+        pm_high = max(bar.h for bar in bars)
+        pm_volume = sum(bar.v for bar in bars)
 
         daily_stats = daily.get(symbol)
         if not daily_stats:
             continue
 
         prev_close = daily_stats.prev_close
+        if prev_close <= 0:
+            continue
+            
         avg_vol_30d = daily_stats.avg_vol_30d
-
-        fs = floats[symbol]
-        gap_pct = (pm_last - prev_close) / prev_close if prev_close > 0 else 0.0
-        pm_vol_float = pm_volume / fs if fs > 0 else 0.0
-        relvol = pm_volume / avg_vol_30d if avg_vol_30d > 0 else 0.0
+        dollar_volume = avg_vol_30d * prev_close if avg_vol_30d else 0
 
         price = pm_last
 
-        # Track filter passes
+        # Filter 1: Price range
         pass_price = cfg.min_price <= price <= cfg.max_price
-        pass_float = fs <= cfg.max_float
-        pass_gap = gap_pct >= cfg.min_gap_pct
-        pass_pmvolfloat = pm_vol_float >= cfg.min_pm_vol_float
-        pass_relvol = relvol >= cfg.min_relvol
-
         if pass_price:
             stats["pass_price"] += 1
-        if pass_float:
-            stats["pass_float"] += 1
+
+        # Filter 2: Dollar volume
+        pass_dollar_vol = dollar_volume >= cfg.min_dollar_volume
+        if pass_dollar_vol:
+            stats["pass_dollar_vol"] += 1
+
+        # Filter 3: Gap range
+        gap_pct = (pm_last - prev_close) / prev_close
+        pass_gap = cfg.min_gap_pct <= gap_pct <= cfg.max_gap_pct
         if pass_gap:
             stats["pass_gap"] += 1
-        if pass_pmvolfloat:
-            stats["pass_pmvolfloat"] += 1
-        if pass_relvol:
-            stats["pass_relvol"] += 1
 
-        if not (pass_price and pass_float and pass_gap and pass_pmvolfloat and pass_relvol):
-            # Track near misses - top candidates that almost made it
-            if len(stats["near_miss"]) < 10:
-                fail_reasons = []
-                if not pass_price:
-                    fail_reasons.append(f"price={price:.2f}")
-                if not pass_float:
-                    fail_reasons.append(f"float={fs/1e6:.1f}M")
-                if not pass_gap:
-                    fail_reasons.append(f"gap={gap_pct:.3f}")
-                if not pass_pmvolfloat:
-                    fail_reasons.append(f"pmvolfloat={pm_vol_float:.4f}")
-                if not pass_relvol:
-                    fail_reasons.append(f"relvol={relvol:.2f}")
-                stats["near_miss"].append({
-                    "symbol": symbol,
-                    "gap": gap_pct,
-                    "pm_vol_float": pm_vol_float,
-                    "relvol": relvol,
-                    "float": fs,
-                    "price": price,
-                    "fail": ",".join(fail_reasons),
-                })
+        # Filter 4: First 5-min volume (using 1-min bars for consistency with entry)
+        first_5min = rth_1m_bars.get(symbol, [])
+        pass_5min_vol = False
+        if first_5min and len(first_5min) >= 5:
+            # Use sum(v * c) for dollar volume (consistent with entry)
+            dollar_vol_5min = sum(bar.v * bar.c for bar in first_5min[:5])
+            pass_5min_vol = dollar_vol_5min >= cfg.min_5min_volume
+            if pass_5min_vol:
+                stats["pass_5min_vol"] += 1
+
+        # Filter 5: Opening strength (9:35 close > 9:30 open)
+        pass_opening = False
+        if cfg.opening_strength and first_5min and len(first_5min) >= 1:
+            open_930 = first_5min[0].o
+            close_935 = first_5min[-1].c
+            pass_opening = close_935 > open_930
+            if pass_opening:
+                stats["pass_opening"] += 1
+
+        if not (pass_price and pass_dollar_vol and pass_gap and pass_5min_vol and pass_opening):
             continue
 
-        score = score_candidate(gap_pct, pm_vol_float, relvol)
         candidates.append(
             Candidate(
                 symbol=symbol,
@@ -848,15 +894,16 @@ def fetch_candidates(
                 pm_high=pm_high,
                 pm_volume=pm_volume,
                 avg_vol_30d=avg_vol_30d,
-                float_shares=fs,
+                float_shares=0,
                 gap_pct=gap_pct,
-                pm_vol_float=pm_vol_float,
-                relvol=relvol,
-                score=score,
+                pm_vol_float=0,
+                relvol=0,
+                score=gap_pct,  # Score by gap size
             )
         )
 
-    candidates.sort(key=lambda c: c.score, reverse=True)
+    # Sort by gap size (largest first)
+    candidates.sort(key=lambda c: c.gap_pct, reverse=True)
     return candidates, stats
 
 
@@ -959,35 +1006,20 @@ def _main_inner(args: argparse.Namespace) -> None:
 
         # Log SCAN_SUMMARY
         logger.info(
-            "SCAN_SUMMARY t=%s attempt=%d universe=%d float_ok=%d bars_ok=%d "
-            "pass_price=%d pass_float=%d pass_gap=%d pass_pmvolfloat=%d pass_relvol=%d "
+            "SCAN_SUMMARY t=%s attempt=%d universe=%d "
+            "pass_price=%d pass_dollar_vol=%d pass_gap=%d pass_5min_vol=%d pass_opening=%d "
             "candidates=%d refresh=%s",
             now.strftime("%H:%M"),
             scan_attempt,
             stats["universe_count"],
-            stats["float_ok"],
-            stats["bars_ok"],
             stats["pass_price"],
-            stats["pass_float"],
+            stats["pass_dollar_vol"],
             stats["pass_gap"],
-            stats["pass_pmvolfloat"],
-            stats["pass_relvol"],
+            stats["pass_5min_vol"],
+            stats["pass_opening"],
             len(candidates),
             "universe" if is_universe_refresh else "light",
         )
-
-        # Log SCAN_NEAR_MISS if no candidates
-        if not candidates and stats["near_miss"]:
-            for nm in stats["near_miss"]:
-                logger.info(
-                    "SCAN_NEAR_MISS symbol=%s gap=%.3f pm_vol_float=%.4f relvol=%.2f float=%.1fM FAIL=%s",
-                    nm["symbol"],
-                    nm["gap"],
-                    nm["pm_vol_float"],
-                    nm["relvol"],
-                    nm["float"] / 1e6,
-                    nm["fail"],
-                )
 
         if not candidates:
             if now >= entry_window.end:
@@ -1067,6 +1099,7 @@ def _main_inner(args: argparse.Namespace) -> None:
         candidate_map=candidate_map,
         risk_manager=risk_manager,
         account_equity=args.equity,
+        account_cash=args.equity,  # Use equity as cash proxy for now
         execution=execution,
         positions=positions,
         state_store=state_store,

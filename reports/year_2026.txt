@@ -1,0 +1,42 @@
+﻿Running Pure Signal Backtest from 2026-01-01 to 2026-12-31
+Minimum dollar volume: $10,000,000
+Minimum price: $2.0
+
+
+Testing bucket: 7-15%
+  DEBUG SLIPPAGE: entry_raw=$2.59 entry_filled=$2.60 exit_raw=$4.36 exit_filled=$4.35 slip_$$=-1.75 slip_%=-67.60% exit=hard_exit
+  Candidates: 517
+  Trades: 83
+  Win Rate: 49.4%
+  Continuation Rate: 49.4%
+  Avg Return: 2.86%
+  Expectancy: 2.86%
+
+================================================================================
+PURE SIGNAL GAP BACKTEST (Test 1)
+Entry: 9:35 | Exit: 9:45 | Filters: Opening Strength, Portfolio
+================================================================================
+
+--- PORTFOLIO SIMULATION (Option B: Daily Cap, 25% max deployed) ---
+  DEBUG DAY 1: equity=$5000 40pct=$2000 hard_cap=$50000.0 daily_cap=$2000 trades=3 pos_per_trade=$666.67
+  DEBUG TRADE: BIDU ret=-0.81% slip=$3.33 hair=$0.00 pnl=$-5.42
+  DEBUG TRADE: SOXL ret=-0.39% slip=$3.33 hair=$0.00 pnl=$-2.62
+  DEBUG DAY 1 END: deployed_today=$2000.00 unused=$0.00
+  DEBUG SUMMARY: days=20 sum_deployed=$43,833.68 sum_unused=$0.00
+7-15%: 83 trades across 20 days -> Portfolio Return: 21.69% | Final: $6,085
+  Cap Stats: 0/83 (0.0%) trades capped | 0 days affected
+  Avg Participation: 0.03% of 5-min vol | Max: 0.06%
+  Avg Deployed: $2,192/day | Avg Unused: $0/day
+  Max Drawdown: 1.75% | Longest Flat Period: 3 days
+SUMMARY start=5000 final=6085 ret_pct=21.7 max_dd_pct=1.8 trades=83 win_pct=0.0 avg_ret=2.86 avg_deployed=2192
+--------------------------------------------------
+
+Bucket   Cand.   Trades  Trades/Day  Win%     Cont.%   Avg%       Med%       Exp%      
+-----------------------------------------------------------------------------------------------
+7-15%    517     83      0.3         49.4%    49.4%    2.86       -0.07      2.86      
+
+CONTINUATION RATE BY GAP SIZE:
+----------------------------------------
+  7-15%: 49.4%
+
+Error: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>

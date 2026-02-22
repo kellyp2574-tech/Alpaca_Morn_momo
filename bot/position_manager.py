@@ -15,15 +15,17 @@ from .config import Config
 from .execution import ExecutionClient, FillResult
 from .state_manager import StateStore
 from .storage import PositionState
+from alpaca.trading.enums import OrderSide
 
 _SESSION_DATE: Optional[str] = None
 
 
 def _session_date() -> str:
-    """Return today's date string once per process for stable client_order_id generation."""
+    """Return today's date string, updating if day has changed."""
     global _SESSION_DATE
-    if _SESSION_DATE is None:
-        _SESSION_DATE = market_now().strftime("%Y%m%d")
+    today = market_now().strftime("%Y%m%d")
+    if _SESSION_DATE != today:
+        _SESSION_DATE = today
     return _SESSION_DATE
 
 
@@ -102,7 +104,7 @@ class PositionManager:
     def open_position(
         self,
         symbol: str,
-        qty: int,
+        qty: float,
         entry_price: float,
         stop_pct: float,
         *,
@@ -125,7 +127,7 @@ class PositionManager:
         )
         self.positions[symbol] = state
         logger.info(
-            "Opened position %s qty=%s entry=%.2f stop=%.2f (%.2f%%)",
+            "Opened position %s qty=%.4f entry=%.2f stop=%.2f (%.2f%%)",
             symbol,
             qty,
             entry_price,
@@ -158,25 +160,12 @@ class PositionManager:
 
         self._update_breakeven(symbol, state)
         self._update_trail(state)
-
-        # Dead momentum check
-        elapsed = (now - state.entry_time).total_seconds() / 60.0
-        gain_pct = (price - entry) / entry if entry > 0 else 0.0
-        if (
-            elapsed >= self.cfg.dead_momo_minutes
-            and gain_pct < self.cfg.dead_momo_min_gain
-        ):
-            logger.info(
-                "%s dead momentum exit (elapsed %.1f min, gain %.2f%%)",
-                symbol, elapsed, gain_pct * 100,
-            )
-            self._exit(symbol, state, price, now, reason="dead_momo")
-            return
-
-        # Stop hit (synthetic): trigger on bar.low, fill modeled at stop_price
-        if bar.l <= state.stop_price:
-            self._exit(symbol, state, state.stop_price, now, reason="stop")
-            return
+        
+        # Stop loss is handled by main.py _check_position_exits using quotes
+        # Bar-based stop disabled to avoid duplicate/conflicting triggers
+        # if bar.l <= state.stop_price:
+        #     self._exit(symbol, state, state.stop_price, now, reason="stop")
+        #     return
 
         self._persist()
 
@@ -190,18 +179,17 @@ class PositionManager:
 
     def _update_trail(self, state: PositionState) -> None:
         entry = state.entry_price
+        
+        # Gap strategy: activate at take_profit_pct, trail at trail_pct
         if not state.trail_active and state.peak_price >= entry * (
-            1 + self.cfg.trail_activate_at_pct
+            1 + self.cfg.take_profit_pct
         ):
             state.trail_active = True
-            state.trail_pct = self.cfg.trail_pct_1
+            state.trail_pct = self.cfg.trail_pct
             logger.info("%s trail activated at %.2f%%", state.symbol, state.trail_pct * 100)
 
         if state.trail_active:
-            trail_pct = state.trail_pct or self.cfg.trail_pct_1
-            if state.peak_price >= entry * (1 + self.cfg.trail_widen_at_pct):
-                trail_pct = self.cfg.trail_pct_2
-                state.trail_pct = trail_pct
+            trail_pct = state.trail_pct if state.trail_pct else self.cfg.trail_pct
             trail_stop = state.peak_price * (1 - trail_pct)
             state.stop_price = max(state.stop_price, trail_stop)
 
@@ -217,7 +205,10 @@ class PositionManager:
         self, price_lookup: Dict[str, float], *, reason: str = "hard_exit"
     ) -> None:
         for symbol, state in list(self.positions.items()):
-            price = price_lookup.get(symbol, state.peak_price)
+            # Use current bid price from lookup, fallback to reference price, not peak
+            price = price_lookup.get(symbol)
+            if not price or price <= 0:
+                price = self.execution._reference_price(symbol, OrderSide.SELL, state.entry_price)
             self._exit(symbol, state, price, market_now(), reason=reason)
 
     # ------------------------------------------------------------------
@@ -280,7 +271,7 @@ class PositionManager:
             self._record_fill(symbol, state, fill, now)
         elif fill.status == "partial":
             logger.warning(
-                "%s partial fill on exit: %.0f/%.0f shares @ %.2f",
+                "%s partial fill on exit: %.4f/%.4f shares @ %.2f",
                 symbol, fill.filled_qty, state.qty, fill.avg_price,
             )
             if self.stats is not None:
@@ -296,6 +287,17 @@ class PositionManager:
             state.exit_order_id = None
             state.exit_client_order_id = None
             state.exit_submitted_ts = None
+            
+            # If remaining qty is meaningful, resubmit exit
+            if state.qty > 0.0001:
+                logger.info("%s partial exit: resubmitting for remaining %.4f shares", symbol, state.qty)
+                # Get current price from execution client
+                current_price = self.execution._reference_price(symbol, OrderSide.SELL, fill.avg_price)
+                self._exit(symbol, state, current_price, now, reason="partial_exit")
+            else:
+                # Close position completely
+                del self.positions[symbol]
+            
             self._persist()
         elif fill.status == "unfilled":
             logger.warning(
@@ -336,7 +338,7 @@ class PositionManager:
         state.exit_price = price
         self.risk_manager.on_trade_closed(state.realized_r or 0.0)
         logger.info(
-            "EXIT %s qty=%.0f @ %.2f reason=%s R=%.2f order=%s",
+            "EXIT %s qty=%.4f @ %.2f reason=%s R=%.2f order=%s",
             symbol, fill.filled_qty, price, state.exit_reason,
             state.realized_r or 0.0, fill.order_id,
         )
